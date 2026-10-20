@@ -31,17 +31,19 @@ DEVICES = {
         'ufs': (0x01d84000, 0x3000),
         # Descriptive CPU clocks (the bootloader owns DVFS): A55, A76
         'cpu_clock': (1804800000, 2304000000),
-        # Touch power: RPMh resource, mV, TLMM pin gating the 1.8 V rail.
-        # The bus itself (QUPv3 SE7 0xa84000, TLMM 6/7 SDA/SCL, 8 reset,
-        # 9 IRQ, Goodix 0x5d) is identical on both boards.
-        'touch': ('ldoc11', 3200, 90),
+        # Touch power: RPMh resource, mV, TLMM pin gating the 1.8 V rail,
+        # and the TLMM base the driver maps. The bus itself (QUPv3 SE7
+        # 0xa84000, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ, Goodix 0x5d) is
+        # identical on both boards. sweet keeps the historical 0x03900000
+        # that has always worked on the phone (see docs/davinci-hw.md).
+        'touch': ('ldoc11', 3200, 90, 0x03900000),
     },
     'davinci': {
         'board': 'xiaomi,davinci',
-        # Mi 9T: 6 GiB LPDDR4X, 2 GiB low + 4 GiB upper like sweet. The ABL
-        # injects /memory, so the board DTS cannot confirm the usable top of
-        # the upper bank: verify it with tools/fdt-device.py on the stock
-        # boot.img DTB before trusting these two values.
+        # Mi 9T: 6 GiB LPDDR4X, 2 GiB low + 4 GiB upper. Confirmed by the
+        # bootloader-patched live FDT (sm7150-mainline/downstream-fdt
+        # fdt-davinci): /memory = <0x80000000 0x80000000> and
+        # <0x1_00000000 0xfcc00000>, with the dynamic pools below 4G.
         'low_dram': (0xb0000000, 0x4d000000),
         'high_dram': (0x100000000, 0xfcc00000),
         'soc': 'sm7150',
@@ -52,7 +54,8 @@ DEVICES = {
         'cpu_clock': (1804800000, 2208000000),
         # Xiaomi davinci DTS: vtouch-supply = pm6150l_l6 (RPMh ldoc6, the
         # regulator tops out at 3.1 V), goodix,avdd-gpio = TLMM 5 (1.8 V).
-        'touch': ('ldoc6', 3100, 5),
+        # The live FDT puts pinctrl@3400000 at the sdmmagpie TLMM base.
+        'touch': ('ldoc6', 3100, 5, 0x03400000),
     },
 }
 
@@ -235,14 +238,16 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
         ('reg', u64(ufs_base, ufs_size)),
     ])
 
-    # bsd/dev/sweet_touch.c: board power wiring (panel size comes from
-    # sweet-fbcon above). Absent node/properties keep the sweet defaults.
-    vreg, vreg_mv, power_gpio = dev['touch']
+    # bsd/dev/sweet_touch.c: board power wiring and TLMM base (panel size
+    # comes from sweet-fbcon above). Absent node/properties keep the sweet
+    # defaults.
+    vreg, vreg_mv, power_gpio, tlmm_base = dev['touch']
     touch = node('sweet-touch', [
         ph(),
         ('vreg-name', cstr(vreg)),
         ('vreg-mv', u32(vreg_mv)),
         ('power-gpio', u32(power_gpio)),
+        ('tlmm-base', u32(tlmm_base)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.

@@ -152,14 +152,15 @@ The Mi 9T is the same SM7150 family as the Note 10 Pro, so the kernel is **not**
 | --- | --- | --- |
 | Panel | 1080×2400 AMOLED | 1080×2340 AMOLED (Samsung EA F10, DSI command mode) |
 | Splash framebuffer | `0x9c000000`, 0x1700000 | identical |
-| Touch | Goodix GT9896, I²C `0x5d` on QUPv3 SE7 `0xa84000`, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ | Goodix GT9889, same bus and pins |
+| Touch | Goodix GT9896, I²C `0x5d` on QUPv3 SE7 `0xa84000`, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ | Goodix GT9889, same bus; GPIO6/7 are the QUP11 I²C function, 8 reset, 9 IRQ |
 | Touch power | PM6150L LDO11 (`ldoc11`, 3200 mV), TLMM 90 gate | PM6150L LDO6 (`ldoc6`, 3100 mV), TLMM 5 (1.8 V gate) |
+| TLMM base | `0x03900000` (historical driver value, kept so the working phone is unchanged) | `0x03400000` (from the DTB/live FDT) |
 | Keys | PM6150 PON + PM6150L GPIO2 | identical |
 | UFS / GIC / RPMh / SPMI / IMEM / USB / timer | `0x1d84000` / `0x17a00000` / `0x18220000` / `0xc440000` / `0x146aa65c` / `0xa600000` / 19.2 MHz | identical |
 
-Everything above is encoded in `tools/mkadt.py`'s `davinci` profile and in `shim/device.h`; the touch driver reads the rail and pin from the ADT (`sweet-touch` node), so an old ADT keeps the sweet defaults.
+Everything above is encoded in `tools/mkadt.py`'s `davinci` profile and in `shim/device.h`; the touch driver reads the rail, pin and TLMM base from the ADT (`sweet-touch` node), so an old ADT keeps the sweet defaults.
 
-Use the same steps as above with the device-specific commands below. Step 0 (unpacking your Mi 9T's stock `boot.img` into `dtb/boot_unpacked/`) is also what gives the shim its board DTB.
+Use the same steps as above with the device-specific commands below. Step 0 (unpacking your Mi 9T's stock `boot.img` into `dtb/boot_unpacked/`) gives the shim the **base** `qcom,sdmmagpie` DTB; the board/panel nodes live in the `dtbo` partition and ABL merges them onto that base during boot, exactly as for a stock boot. The MIUI 12 boot image is header v1 with no header DTB, so the base DTB is in the appended `Image.gz-dtb` collection; `tools/unpack_bootv2.py` and the appended-DTB scan in `docs/davinci-hw.md` extract it.
 
 ```sh
 # Check the stock DTB against the profile first: memory banks, splash
@@ -175,7 +176,7 @@ fastboot boot shim/out/shim-boot-davinci.img       # temporary boot, nothing is 
 
 For the first bring-up start with `cpus=1` instead of `cpus=6`, and keep `sweettouchdelay=120` so the kernel log can be read before the touch driver touches the bus.
 
-The iPhone X image is unchanged: it is presented as a 1125×2436 canvas and centre-cropped to the 1080×2340 panel (48 px off the top and bottom); touch coordinates are normalized with the panel size from the ADT. The splash buffer is at the same `0x9c000000` as sweet, but the one number that cannot be checked against Xiaomi's published DTS is the usable top of the upper DDR bank (`0x100000000` + `0xfcc00000` is assumed, the value sweet reports): ABL fills in `/memory`, so read it from your own phone and update `tools/mkadt.py` if it differs. `tools/fdt-device.py` prints it together with the splash region, the panel, the touch node, the keys and the SoC blocks.
+The iPhone X image is unchanged: it is presented as a 1125×2436 canvas and centre-cropped to the 1080×2340 panel (48 px off the top and bottom); touch coordinates are normalized with the panel size from the ADT. The splash buffer is at the same `0x9c000000` as sweet. The upper DDR bank is `0x100000000` + `0xfcc00000`, confirmed by a bootloader-patched live davinci FDT (ABL fills in `/memory`, so it is not in the static DTB); `tools/fdt-device.py` prints it together with the splash region, the panel, the touch node, the keys and the SoC blocks, so you can re-check it on your own phone.
 
 ## Repository layout
 
@@ -185,7 +186,7 @@ The iPhone X image is unchanged: it is presented as a 1125×2436 canvas and cent
 | `xnu/patches/` | The XNU patch series (applied in order by CI), plus staging scripts for libpthread, HFS and BearSSL |
 | `.github/workflows/xnu.yml` | Kernel CI build |
 | `tools/mkadt.py` | Generates the Apple Device Tree from the board's MMIO layout (`--device sweet\|davinci`) and the iPhone X identity |
-| `tools/fdt-device.py` | Prints memory/splash/panel/touch/PMIC facts from a stock `boot.img` DTB (verifies a device profile) |
+| `tools/fdt-device.py` | Prints memory/splash/panel/touch/PMIC facts from a stock `boot.img` DTB or a live FDT (verifies a device profile) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
@@ -229,7 +230,7 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0079 | Display power |
 | 0080 | Network trace |
 | 0081 | USB link state |
-| 0082 | Board values from the ADT: panel size for HID/touch, touch rail and power pin (davinci) |
+| 0082 | Board values from the ADT: panel size for HID/touch, touch rail, power pin and TLMM base (davinci) |
 
 ## Key hardware facts
 
@@ -237,7 +238,7 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 - GICv3 with security extensions: the timer goes through Group 1 IRQ (virtual timer INTID 19), not FIQ as on Apple silicon.
 - PSCI through `smc`, 19.2 MHz timer, ARMv8.2 without pointer authentication. MPIDR uses Aff1 for the core number.
 - Panel: sweet 1080×2400 DSC video mode, davinci 1080×2340 command mode; both use the continuous ABL splash buffer at `0x9c000000`, no refresh kick needed.
-- Touch: Goodix GT9896 (sweet) / GT9889 (davinci) at I²C `0x5d` on QUP SE7 (`0xa84000`); sweet is powered by PM6150L LDO11, davinci by LDO6 plus a 1.8 V gate on TLMM 5, both through RPMh.
+- Touch: Goodix GT9896 (sweet) / GT9889 (davinci) at I²C `0x5d` on QUP SE7 (`0xa84000`); sweet is powered by PM6150L LDO11, davinci by LDO6 plus a 1.8 V gate on TLMM 5, both through RPMh. The driver maps the TLMM base supplied by the ADT (davinci `0x03400000`).
 - Buttons: power and volume down on the PM6150 PON block, volume up on PM6150L GPIO2 (SPMI SID 4) — identical on both boards.
 
 More in [`NOTES.md`](NOTES.md).

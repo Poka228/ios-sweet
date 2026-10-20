@@ -103,18 +103,28 @@
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -78,6 +80,10 @@
+@@ -24,7 +26,8 @@
+ 
+ #define TOUCH_SE_PA      0x00a84000u
+ #define TOUCH_GCC_PA     0x00100000u
+-#define TOUCH_NORTH_PA   0x03900000u /* DT TLMM + NORTH (0x500000) */
++/* Historical sweet value; the ADT supplies the real base per board. */
++#define TOUCH_TLMM_PA    0x03900000u
+ #define TOUCH_GCC_VOTE   0x5200cu
+ #define TOUCH_RCG       0x18148u    /* wrapper1 LOCAL S1 = global SE7 */
+ #define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)
+@@ -78,6 +81,10 @@
  	uint32_t irq_status, irq_last, active;
  	unsigned sent, got;
  	int x[TOUCH_MAX], y[TOUCH_MAX];
 +	/* Board values: defaults are sweet, the ADT overrides them (davinci). */
-+	uint32_t panel_w, panel_h, power_gpio;
++	uint32_t panel_w, panel_h, power_gpio, tlmm_pa;
 +	char vreg[24];
 +	unsigned vreg_mv;
  } st;
  static int touch_sleep_chan;
  
-@@ -118,6 +124,52 @@
+@@ -118,6 +125,58 @@
  	return false;
  }
  
@@ -124,6 +134,8 @@
 + * SDA/SCL on TLMM 6/7 (qup11), reset 8, IRQ 9. They differ in the rails:
 + * sweet enables L11C (ldoc11, 3200 mV) and its power gate on TLMM 90, while
 + * davinci enables L6C (ldoc6, 3100 mV) and its 1.8 V gate on TLMM 5.
++ * The TLMM base is also a board property: the pinctrl node is at
++ * 0x03400000 on davinci while sweet has always used 0x03900000.
 + * Missing properties keep the sweet defaults, so old ADTs still boot.
 + */
 +static void
@@ -137,6 +149,7 @@
 +	st.panel_w = 1080;
 +	st.panel_h = 2400;
 +	st.power_gpio = 90;
++	st.tlmm_pa = TOUCH_TLMM_PA;
 +	strlcpy(st.vreg, "ldoc11", sizeof(st.vreg));
 +	st.vreg_mv = 3200;
 +
@@ -154,6 +167,9 @@
 +	if (SecureDTGetProperty(entry, "power-gpio", (void const **)&u32p, &size) == kSuccess && size >= 4) {
 +		st.power_gpio = *u32p;
 +	}
++	if (SecureDTGetProperty(entry, "tlmm-base", (void const **)&u32p, &size) == kSuccess && size >= 4) {
++		st.tlmm_pa = *u32p;
++	}
 +	if (SecureDTGetProperty(entry, "vreg-mv", (void const **)&u32p, &size) == kSuccess && size >= 4) {
 +		st.vreg_mv = *u32p;
 +	}
@@ -167,7 +183,7 @@
  static void
  touch_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
  {
-@@ -425,7 +477,7 @@
+@@ -425,7 +484,7 @@
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -176,7 +192,7 @@
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -472,7 +524,7 @@
+@@ -472,7 +531,7 @@
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -185,15 +201,19 @@
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -558,6 +610,7 @@
+@@ -558,9 +617,10 @@
  	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
  	printf("SWEET TOUCH: starting in %u s\n", delay_s);
  	touch_wait(delay_s * 1000u);
 +	touch_config();
  	printf("SWEET TOUCH: mapping GCC/TLMM/SE7\n");
  	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
- 	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
-@@ -569,18 +622,18 @@
+-	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
++	st.gpio = ml_io_map(st.tlmm_pa, 0x5b000);
+ 	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
+ 	if (!st.gcc || !st.gpio || !st.se) {
+ 		printf("SWEET TOUCH: MMIO mapping failed\n");
+@@ -569,18 +629,18 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -217,7 +237,7 @@
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -608,8 +661,8 @@
+@@ -608,8 +668,8 @@
  		goto out;
  	}
  	st.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;
