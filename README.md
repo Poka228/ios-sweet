@@ -105,7 +105,7 @@ Needs `aarch64-linux-gnu-gcc` and `mkbootimg`.
 python3 tools/mkadt.py shim/out/sweet.adt --highmem          # add --device davinci on a Mi 9T
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
     --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30'
-shim/build.sh shim/out/payload.bin          # add DEVICE=davinci on a Mi 9T -> shim-boot-<device>.img
+shim/build.sh out/payload.bin          # add DEVICE=davinci on a Mi 9T -> shim-boot-<device>.img
 ```
 
 What the less obvious boot-args do:
@@ -170,7 +170,7 @@ python3 tools/fdt-device.py dtb/boot_unpacked/dtb
 python3 tools/mkadt.py shim/out/davinci.adt --highmem --device davinci
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/davinci.adt shim/out/payload.bin \
     --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30 sweettouchdelay=120'
-DEVICE=davinci shim/build.sh shim/out/payload.bin  # -> shim/out/shim-boot-davinci.img
+DEVICE=davinci shim/build.sh out/payload.bin  # -> shim/out/shim-boot-davinci.img
 fastboot boot shim/out/shim-boot-davinci.img       # temporary boot, nothing is flashed
 ```
 
