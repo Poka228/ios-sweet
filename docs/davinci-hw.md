@@ -206,8 +206,8 @@ no Goodix node). The board/panel nodes therefore come from the `dtbo`
 partition.
 
 The stock `dtbo` dump (746,917 bytes, Android dt_table v0) contains three
-full overlays with `qcom,board-id` **39, 40 and 41** (downstream 39 = the
-dumped unit). The base DTB has `__symbols__` and the overlays carry
+full overlays with `qcom,board-id` **39, 40 and 41** (the dumped 6 GB unit
+reports **40** in its live FDT). The base DTB has `__symbols__` and the overlays carry
 `__fixups__`, so ABL can apply them normally. Extract the base with
 
 ```sh
@@ -633,7 +633,7 @@ high-speed only.
 | Feature | sweet (Redmi Note 10 Pro / Pro Max) | davinci (Mi 9T / K20) |
 |---|---|---|
 | SoC | SM7150 family (SD732G), msm-id 365 | SM7150-AA (SD730), msm-id 365 (same ID) |
-| Downstream board-id | 46 | **39** |
+| Downstream board-id | 46 | DTS overlay **39**; stock dtbo also ships **40** (dumped 6 GB unit) and **41** |
 | Mainline board-id | 46 | **40** |
 | RAM in dump | 8 GB: 4 GiB @ 0x8000_0000 + 0xFBB0_0000 @ 0x1_8000_0000 | 6 GB: 2 GiB @ 0x8000_0000 + 0xFCC0_0000 @ 0x1_0000_0000 |
 | Front camera | fixed (punch-hole) | **pop-up**, TI DRV8846 motor |
@@ -810,7 +810,7 @@ because the port has so far only been built, not run on a Mi 9T.
 | AKM IRQ number | DT `interrupts` says 120, GPIO property says 93. GPIO93 is what the driver uses. |
 | Panel `dsi-display-active` semantics | The flag on `dsi_sim_vid_display` is a leftover; real selection is the bootarg. |
 | `androidboot.dtbo_idx` panel mapping | Dumped EA unit uses `dtbo_idx=1`, `dtb_idx=0`. Likely selects the panel/hwvariant DTBO; the EB index is unconfirmed. |
-| Board-id 39 vs 40 | Both are real: downstream overlay 39, mainline 40. Match the bootloader's expected value per kernel tree. |
+| Board-id 39 vs 40 vs 41 | All three overlays ship in the stock dtbo. The dumped 6 GB unit reports 40 at runtime; ABL picks by the hardware id, so do not hardcode one. |
 
 ---
 
