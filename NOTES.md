@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-10-20, davinci port)
+
+**STATE:** the tree now builds a **Xiaomi Mi 9T (davinci, SM7150-AA)** boot image from the same kernel as sweet. Branch `davinci-port` (baseline `11da58b`). Nothing has been run on Mi 9T hardware yet, and no new kernel binary exists: the XNU build still needs the GitHub macOS runner.
+
+What changed (all local, uncommitted at the time of writing):
+- `tools/mkadt.py`: `DEVICES` profiles for `sweet` and `davinci`, `--device davinci` flag. davinci values: splash `0x9c000000` size `0x1700000` (same), panel 1080×2340, UFS `0x1d84000`, Kryo 470 clocks 1.8/2.2 GHz, upper DDR bank assumed `0x100000000` + `0xfcc00000`. New root node `sweet-touch` = `vreg-name`/`vreg-mv`/`power-gpio` (sweet `ldoc11`/3200/90, davinci `ldoc6`/3100/5); root `compatible` gains `xiaomi,davinci` after the `xiaomi,sweet` platform-expert token.
+- `shim/device.h` (new): `DEVICE_DAVINCI` profile (`FB_BASE 0x9c000000`, `FB_W 1080`, `FB_H 2340`); `console.h`/`mmu.h` include it. `shim/build.sh`: `DEVICE=sweet|davinci`, `DTB=`, `CC=`, `OBJCOPY=`, emits `out/shim-boot-<device>.img` (and the historical `shim-boot.img` name).
+- `xnu/patches/0082-sweet-davinci-panel-touch-adt.patch` (new, **not CI-built yet**): `SweetHID.cpp` reads panel width/height from ADT `sweet-fbcon` (defaults 1080×2400) and derives the digitizer clamps/offsets; `sweet_touch.c` reads the same panel size plus `sweet-touch` rail/mV/pin (defaults = sweet). The QUPv3 SE7 bus, TLMM 6/7/8/9 and Goodix `0x5d` are identical on davinci per the Xiaomi DTS, so only the rails differ.
+- `tools/fdt-device.py` (new): dumps `/memory`, `/reserved-memory` (splash), panels, touch nodes/supplies, PON/GPIO keys and the hardcoded SoC blocks from a stock `boot.img` DTB. Use it to confirm the two assumptions above on the actual phone.
+
+Verified locally: `mkadt.py` emits both profiles (davinci diff = board token, A76 clock, fbcon height 2340, touch node); `shim/build.sh` builds for both devices with `aarch64-linux-gnu-gcc` + AOSP `mkbootimg` (+ a local cpio shim); patch 0082 applies cleanly on top of 0001–0081 against apple-oss xnu-8796.141.3 (the two staged-HFS patches 0031/0041 only fail locally because their source staging scripts did not run).
+
+Sources for the davinci facts: Xiaomi/LineageOS `kernel_xiaomi_sm6150` (sdmmagpie = SM7150) DTS — `xiaomi/davinci/davinci-sdmmagpie.dtsi` (goodix@5d on `qupv3_se7_i2c`, reset 8, irq 9, avdd GPIO 5, vtouch `pm6150l_l6`), `dsi-panel-ss-fhd-ea-f10-cmd.dtsi` (1080×2340), `sdmmagpie.dtsi` (`cont_splash_region@9c000000 0x1700000`, `ufshc@1d84000`), `sdmmagpie-regulator.dtsi` (`ldoc6`, max 3.1 V) and `xiaomi-sdmmagpie-common.dtsi` (volume up = PM6150L GPIO2 active low).
+
+**NEXT:**
+1. Build kernel via Actions (needs `gh auth login`/fork; `gh` is not installed locally) and check 0082 compiles.
+2. On a Mi 9T: pull stock `boot.img`, run `tools/fdt-device.py`, compare the DDR top and splash base; then `fastboot boot shim/out/shim-boot-davinci.img`. Use `cpus=1` and `sweettouchdelay=120` for the first boot.
+3. If the touch panel is not the expected GT9889 (probe log prints all `probe 0x5d/0x38` bytes), extend the driver; FocalTech 54:52 is already supported.
+4. Root image (`userdata`) build and flash still need the iPhone X IPSW and explicit user confirmation (destructive).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

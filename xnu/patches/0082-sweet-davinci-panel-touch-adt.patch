@@ -1,0 +1,230 @@
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -21,6 +21,7 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #include <libkern/c++/OSArray.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ #include "IOHIDEventService.h"
+ #include "IOHIDEventServiceUserClient.h"
+@@ -367,6 +368,7 @@
+ 	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 2; }
+ private:
+ 	IOLock *fLock;
++	int fPanelW, fPanelH;		/* native panel pixels, ADT sweet-fbcon */
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+@@ -432,19 +434,39 @@
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
++	/*
++	 * The panel size comes from the same ADT node the framebuffer console
++	 * and SweetFramebuffer use (tools/mkadt.py): sweet is 1080x2400,
++	 * davinci 1080x2340. The iPhone X canvas stays 1125x2436 and the panel
++	 * is centre-cropped out of it, so the digitizer offsets are derived.
++	 */
++	fPanelW = 1080;
++	fPanelH = 2400;
++	DTEntry entry;
++	uint32_t const *val;
++	unsigned int size;
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) == kSuccess) {
++		if (SecureDTGetProperty(entry, "width", (void const **)&val, &size) == kSuccess && size >= 4) {
++			fPanelW = *val;
++		}
++		if (SecureDTGetProperty(entry, "height", (void const **)&val, &size) == kSuccess && size >= 4) {
++			fPanelH = *val;
++		}
++	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = native ? fPanelW : 1125;
++	fLogicalH = native ? fPanelH : 2436;
++	fOffX = (fLogicalW - fPanelW) / 2;
++	fOffY = (fLogicalH - fPanelH) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+ 	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
+ 	gSweetTouch = this;
+ 	registerService();
+-	IOLog("SWEET HID: touch registered\n");
++	IOLog("SWEET HID: touch registered (panel %dx%d, logical %dx%d)\n",
++	    fPanelW, fPanelH, fLogicalW, fLogicalH);
+ 	return true;
+ }
+ 
+@@ -458,8 +480,8 @@
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x >= fPanelW ? fPanelW - 1 : x);
++	y = y < 0 ? 0 : (y >= fPanelH ? fPanelH - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -472,8 +494,8 @@
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > fPanelW - 1 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > fPanelH - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -1,7 +1,8 @@
+ /*
+  * SWEET SE7 FIFO I2C / GT9896 Yellowstone / Focaltech 54:52 bring-up.
+  * Call once after the scheduler is running; all work runs on one thread.
+- * Requires ABL-loaded GENI I2C firmware; votes L11C through sweet_rpmh.c.
++ * Requires ABL-loaded GENI I2C firmware; votes the touch LDO through
++ * sweet_rpmh.c (L11C on sweet, L6C on davinci; see touch_config).
+  * No firmware/config upload or direct PMIC writes. Only IC data write:
+  * zero to GT9896's event status after reading a report. See touch2/report.md.
+  */
+@@ -14,6 +15,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -78,6 +80,10 @@
+ 	uint32_t irq_status, irq_last, active;
+ 	unsigned sent, got;
+ 	int x[TOUCH_MAX], y[TOUCH_MAX];
++	/* Board values: defaults are sweet, the ADT overrides them (davinci). */
++	uint32_t panel_w, panel_h, power_gpio;
++	char vreg[24];
++	unsigned vreg_mv;
+ } st;
+ static int touch_sleep_chan;
+ 
+@@ -118,6 +124,52 @@
+ 	return false;
+ }
+ 
++/*
++ * Panel size and board power wiring come from the ADT (tools/mkadt.py).
++ * Both boards use the same GT9889/FT8716-class bus: QUPv3 SE7 at 0xa84000,
++ * SDA/SCL on TLMM 6/7 (qup11), reset 8, IRQ 9. They differ in the rails:
++ * sweet enables L11C (ldoc11, 3200 mV) and its power gate on TLMM 90, while
++ * davinci enables L6C (ldoc6, 3100 mV) and its 1.8 V gate on TLMM 5.
++ * Missing properties keep the sweet defaults, so old ADTs still boot.
++ */
++static void
++touch_config(void)
++{
++	DTEntry entry;
++	uint32_t const *u32p;
++	char const *strp;
++	unsigned int size;
++
++	st.panel_w = 1080;
++	st.panel_h = 2400;
++	st.power_gpio = 90;
++	strlcpy(st.vreg, "ldoc11", sizeof(st.vreg));
++	st.vreg_mv = 3200;
++
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) == kSuccess) {
++		if (SecureDTGetProperty(entry, "width", (void const **)&u32p, &size) == kSuccess && size >= 4) {
++			st.panel_w = *u32p;
++		}
++		if (SecureDTGetProperty(entry, "height", (void const **)&u32p, &size) == kSuccess && size >= 4) {
++			st.panel_h = *u32p;
++		}
++	}
++	if (SecureDTFindEntry("name", "sweet-touch", &entry) != kSuccess) {
++		return;
++	}
++	if (SecureDTGetProperty(entry, "power-gpio", (void const **)&u32p, &size) == kSuccess && size >= 4) {
++		st.power_gpio = *u32p;
++	}
++	if (SecureDTGetProperty(entry, "vreg-mv", (void const **)&u32p, &size) == kSuccess && size >= 4) {
++		st.vreg_mv = *u32p;
++	}
++	if (SecureDTGetProperty(entry, "vreg-name", (void const **)&strp, &size) == kSuccess && size > 1 &&
++	    size <= sizeof(st.vreg)) {
++		memcpy(st.vreg, strp, size);
++		st.vreg[size - 1] = '\0';
++	}
++}
++
+ static void
+ touch_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
+ {
+@@ -425,7 +477,7 @@
+ 		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
+ 		/* Low nibble 1/3 denotes pen data in the vendor parser. */
+ 		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
+-		    (mask & (1u << id)) || px > 1079 || py > 2399) {
++		    (mask & (1u << id)) || px >= st.panel_w || py >= st.panel_h) {
+ 			(void)touch_goodix_ack();
+ 			return EIO;
+ 		}
+@@ -472,7 +524,7 @@
+ 		}
+ 		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
+ 		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
+-		if (px > 1079 || py > 2399) {
++		if (px >= st.panel_w || py >= st.panel_h) {
+ 			return EIO;
+ 		}
+ 		mask |= 1u << id;
+@@ -558,6 +610,7 @@
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET TOUCH: starting in %u s\n", delay_s);
+ 	touch_wait(delay_s * 1000u);
++	touch_config();
+ 	printf("SWEET TOUCH: mapping GCC/TLMM/SE7\n");
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+ 	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
+@@ -569,18 +622,18 @@
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
++	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x pwr=%#x; voting %s %u mV through RPMh\n",
+ 	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(st.power_gpio)), st.vreg, st.vreg_mv);
+ 	/* Keep the IC in reset while its rails settle; IRQ stays an input. */
+ 	touch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */
+ 	touch_gpio(8, 0, 3, 3, true, false);
+-	int power_error = sweet_rpmh_vreg_enable("ldoc11", 3200);
++	int power_error = sweet_rpmh_vreg_enable(st.vreg, st.vreg_mv);
+ 	if (power_error) {
+-		printf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
++		printf("SWEET TOUCH: %s RPMh enable failed %d; probes skipped\n", st.vreg, power_error);
+ 		goto out;
+ 	}
+-	touch_gpio(90, 0, 0, 0, true, true); /* board digital power enable */
++	touch_gpio(st.power_gpio, 0, 0, 0, true, true); /* board digital power enable */
+ 	touch_wait(10); /* conservative rail settling; not a DT timing value */
+ 	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
+ 	touch_gpio(7, 1, 0, 0, false, false);
+@@ -608,8 +661,8 @@
+ 		goto out;
+ 	}
+ 	st.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;
+-	printf("SWEET TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\n",
+-	    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.irq_hint);
++	printf("SWEET TOUCH: selected %s, %ux%u, poll=10ms irq-hint=%d\n",
++	    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.panel_w, st.panel_h, st.irq_hint);
+ 	unsigned errors = 0, ticks = 0;
+ 	while (!st.dead) {
+ 		/* Optional IRQ hint still reads every 100ms, and always while down. */

@@ -1,10 +1,12 @@
 # ios-sweet
 
-**Apple's iOS 16 running on a Redmi Note 10 Pro.**
+**Apple's iOS 16 running on a Redmi Note 10 Pro — and now the Xiaomi Mi 9T.**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
 
-As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock it, open Settings, pull down Control Center and the notification center, and use the touchscreen and the hardware buttons. Rendering runs entirely on the CPU; there is no GPU driver.
+The same kernel and boot image builder also support the **Xiaomi Mi 9T** (`davinci`, SM7150-AA / Snapdragon 730, 1080×2340 panel). Both boards share the SoC blocks, the UFS host, the PMIC wiring and the QUPv3 touch bus, so there is **one kernel binary**; the board differences come from the generated device tree (`tools/mkadt.py --device`) and the shim build (`DEVICE=`). See [Xiaomi Mi 9T (davinci)](#xiaomi-mi-9t-davinci). The davinci bring-up is derived from Xiaomi's published DTS and has not been booted on a Mi 9T yet.
+
+As of **2026-10-18** the sweet phone boots to the **iOS home screen**. You can unlock it, open Settings, pull down Control Center and the notification center, and use the touchscreen and the hardware buttons. Rendering runs entirely on the CPU; there is no GPU driver.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
@@ -100,10 +102,10 @@ ipsw img4 im4p extract research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im
 Needs `aarch64-linux-gnu-gcc` and `mkbootimg`.
 
 ```sh
-python3 tools/mkadt.py shim/out/sweet.adt --highmem
+python3 tools/mkadt.py shim/out/sweet.adt --highmem          # add --device davinci on a Mi 9T
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
     --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30'
-shim/build.sh ../shim/out/payload.bin      # -> shim/out/shim-boot.img
+shim/build.sh shim/out/payload.bin          # add DEVICE=davinci on a Mi 9T -> shim-boot-<device>.img
 ```
 
 What the less obvious boot-args do:
@@ -142,6 +144,39 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 
 `tools/qemu-sweet.py` boots the same kernel on QEMU `virt` with a test RAM-disk root. It is useful for kernel-only changes; see `NOTES.md`.
 
+## Xiaomi Mi 9T (davinci)
+
+The Mi 9T is the same SM7150 family as the Note 10 Pro, so the kernel is **not** rebuilt per board: the CI kernel (`machine_config=SWEET`) is used as is. Only the device tree and the boot shim carry board data.
+
+| | sweet (Note 10 Pro) | davinci (Mi 9T) |
+| --- | --- | --- |
+| Panel | 1080×2400 AMOLED | 1080×2340 AMOLED (Samsung EA F10, DSI command mode) |
+| Splash framebuffer | `0x9c000000`, 0x1700000 | identical |
+| Touch | Goodix GT9896, I²C `0x5d` on QUPv3 SE7 `0xa84000`, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ | Goodix GT9889, same bus and pins |
+| Touch power | PM6150L LDO11 (`ldoc11`, 3200 mV), TLMM 90 gate | PM6150L LDO6 (`ldoc6`, 3100 mV), TLMM 5 (1.8 V gate) |
+| Keys | PM6150 PON + PM6150L GPIO2 | identical |
+| UFS / GIC / RPMh / SPMI / IMEM / USB / timer | `0x1d84000` / `0x17a00000` / `0x18220000` / `0xc440000` / `0x146aa65c` / `0xa600000` / 19.2 MHz | identical |
+
+Everything above is encoded in `tools/mkadt.py`'s `davinci` profile and in `shim/device.h`; the touch driver reads the rail and pin from the ADT (`sweet-touch` node), so an old ADT keeps the sweet defaults.
+
+Use the same steps as above with the device-specific commands below. Step 0 (unpacking your Mi 9T's stock `boot.img` into `dtb/boot_unpacked/`) is also what gives the shim its board DTB.
+
+```sh
+# Check the stock DTB against the profile first: memory banks, splash
+# region, panel size, touch node, PMIC keys, SoC block addresses.
+python3 tools/fdt-device.py dtb/boot_unpacked/dtb
+
+python3 tools/mkadt.py shim/out/davinci.adt --highmem --device davinci
+python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/davinci.adt shim/out/payload.bin \
+    --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30 sweettouchdelay=120'
+DEVICE=davinci shim/build.sh shim/out/payload.bin  # -> shim/out/shim-boot-davinci.img
+fastboot boot shim/out/shim-boot-davinci.img       # temporary boot, nothing is flashed
+```
+
+For the first bring-up start with `cpus=1` instead of `cpus=6`, and keep `sweettouchdelay=120` so the kernel log can be read before the touch driver touches the bus.
+
+The iPhone X image is unchanged: it is presented as a 1125×2436 canvas and centre-cropped to the 1080×2340 panel (48 px off the top and bottom); touch coordinates are normalized with the panel size from the ADT. The splash buffer is at the same `0x9c000000` as sweet, but the one number that cannot be checked against Xiaomi's published DTS is the usable top of the upper DDR bank (`0x100000000` + `0xfcc00000` is assumed, the value sweet reports): ABL fills in `/memory`, so read it from your own phone and update `tools/mkadt.py` if it differs. `tools/fdt-device.py` prints it together with the splash region, the panel, the touch node, the keys and the SoC blocks.
+
 ## Repository layout
 
 | Path | What |
@@ -149,7 +184,8 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `shim/` | Bare-metal boot shim (C + asm) packed as an Android boot.img v2 |
 | `xnu/patches/` | The XNU patch series (applied in order by CI), plus staging scripts for libpthread, HFS and BearSSL |
 | `.github/workflows/xnu.yml` | Kernel CI build |
-| `tools/mkadt.py` | Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity |
+| `tools/mkadt.py` | Generates the Apple Device Tree from the board's MMIO layout (`--device sweet\|davinci`) and the iPhone X identity |
+| `tools/fdt-device.py` | Prints memory/splash/panel/touch/PMIC facts from a stock `boot.img` DTB (verifies a device profile) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
@@ -186,15 +222,23 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0066–0067 | Fault-region crash info; console mute |
 | 0068 | IOSurface lookup semantics for already-mapped surfaces |
 | 0069 | Batched persistent-log flushes |
+| 0070 | Hibernate PID handling |
+| 0071 | Touch edge-tip events for the home/app-switcher gestures |
+| 0072–0077 | USB device mode: probe, EP0, VBUS override, ECM, RX mbufs, live log |
+| 0078 | SMP with all eight cores |
+| 0079 | Display power |
+| 0080 | Network trace |
+| 0081 | USB link state |
+| 0082 | Board values from the ADT: panel size for HID/touch, touch rail and power pin (davinci) |
 
 ## Key hardware facts
 
 - RAM: payloads use the upper bank, `0x100000000` + `0xfcc00000` (about 3.95 GiB), above Qualcomm's protected carve-outs.
 - GICv3 with security extensions: the timer goes through Group 1 IRQ (virtual timer INTID 19), not FIQ as on Apple silicon.
 - PSCI through `smc`, 19.2 MHz timer, ARMv8.2 without pointer authentication. MPIDR uses Aff1 for the core number.
-- Panel: 1080×2400 DSC video mode, continuous splash from ABL, no refresh kick needed.
-- Touch: Goodix GT9896 at I²C `0x5d` on QUP SE7 (`0xa84000`), powered by PM6150L LDO11 through RPMh.
-- Buttons: power and volume down on the PM6150 PON block, volume up on PM6150L GPIO2 (SPMI SID 4).
+- Panel: sweet 1080×2400 DSC video mode, davinci 1080×2340 command mode; both use the continuous ABL splash buffer at `0x9c000000`, no refresh kick needed.
+- Touch: Goodix GT9896 (sweet) / GT9889 (davinci) at I²C `0x5d` on QUP SE7 (`0xa84000`); sweet is powered by PM6150L LDO11, davinci by LDO6 plus a 1.8 V gate on TLMM 5, both through RPMh.
+- Buttons: power and volume down on the PM6150 PON block, volume up on PM6150L GPIO2 (SPMI SID 4) — identical on both boards.
 
 More in [`NOTES.md`](NOTES.md).
 

@@ -1,10 +1,27 @@
 #!/bin/bash
-# Build the shim and wrap it in a boot.img v2 that mirrors the stock PixelOS header.
+# Build the shim and wrap it in a boot.img v2 that mirrors the stock boot header.
+#
+#   ./build.sh [PAYLOAD]            # device: sweet (default)
+#   DEVICE=davinci ./build.sh ...   # Xiaomi Mi 9T
+#   DTB=.../dtb DEVICE=... ./build.sh
+#
+# Picking a device selects shim/device.h's compile-time constants
+# (-DDEVICE_<NAME>); DTB points at the stock boot.img's device tree
+# (tools/unpack_bootv2.py) that ABL will hand to the shim.
 set -euo pipefail
 cd "$(dirname "$0")"
-CC=aarch64-linux-gnu-gcc
-OBJCOPY=aarch64-linux-gnu-objcopy
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+
+DEVICE=${DEVICE:-sweet}
+case "$DEVICE" in
+	sweet|davinci) ;;
+	*) echo "error: unknown DEVICE=$DEVICE (sweet|davinci)" >&2; exit 1 ;;
+esac
+DEVICE_DEF="-DDEVICE_$(echo "$DEVICE" | tr 'a-z' 'A-Z')"
+DTB=${DTB:-../dtb/boot_unpacked/dtb}
+
+CC=${CC:-aarch64-linux-gnu-gcc}
+OBJCOPY=${OBJCOPY:-aarch64-linux-gnu-objcopy}
+CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $DEVICE_DEF"
 mkdir -p out
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
@@ -26,11 +43,17 @@ if [ -n "${1:-}" ]; then
 else
 	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
 fi
+[ -f "$DTB" ] || echo "warning: $DTB missing; the image will not boot until the stock DTB is unpacked there" >&2
 mkbootimg --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
-	--dtb ../dtb/boot_unpacked/dtb --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
+	--dtb "$DTB" --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
 	--tags_offset 0x100 --dtb_offset 0x1f00000 --pagesize 4096 \
 	--os_version 17.0.0 --os_patch_level 2035-06 \
-	--cmdline "console=null" -o out/shim-boot.img
+	--cmdline "console=null" -o "out/shim-boot-$DEVICE.img"
+# Keep the historical name for sweet; davinci keeps its explicit name only,
+# so the shared name can never silently point at the wrong board profile.
+if [ "$DEVICE" = sweet ]; then
+	ln -sf "shim-boot-$DEVICE.img" out/shim-boot.img
+fi
 # Host render of the console layout.
-gcc -O1 -Wall -o out/host_test console.c host_test.c && ./out/host_test
-ls -l out/Image out/shim-boot.img
+gcc -O1 -Wall $DEVICE_DEF -o out/host_test console.c host_test.c && ./out/host_test
+ls -l out/Image "out/shim-boot-$DEVICE.img"
