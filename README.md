@@ -160,7 +160,7 @@ The Mi 9T is the same SM7150 family as the Note 10 Pro, so the kernel is **not**
 
 Everything above is encoded in `tools/mkadt.py`'s `davinci` profile and in `shim/device.h`; the touch driver reads the rail, pin and TLMM base from the ADT (`sweet-touch` node), so an old ADT keeps the sweet defaults.
 
-Use the same steps as above with the device-specific commands below. Step 0 (unpacking your Mi 9T's stock `boot.img` into `dtb/boot_unpacked/`) gives the shim the **base** `qcom,sdmmagpie` DTB; the board/panel nodes live in the `dtbo` partition and ABL merges them onto that base during boot, exactly as for a stock boot. The MIUI 12 boot image is header v1 with no header DTB, so the base DTB is in the appended `Image.gz-dtb` collection; `tools/unpack_bootv2.py` and the appended-DTB scan in `docs/davinci-hw.md` extract it.
+Use the same steps as above with the device-specific commands below. Step 0 (unpacking your Mi 9T's stock `boot.img` into `dtb/boot_unpacked/`) gives the shim the **base** `qcom,sdmmagpie` DTB; the board/panel nodes live in the `dtbo` partition and ABL merges them onto that base during boot, exactly as for a stock boot. The MIUI 12 boot image is header v1 with no header DTB, so the base DTB is in the appended `Image.gz-dtb` collection; extract it with `python3 tools/unpack_bootv2.py dtb/davinci-boot.img dtb/boot_unpacked --scan-dtb` and copy `dtb-01.dtb` over `dtb/boot_unpacked/dtb`.
 
 ```sh
 # Check the stock DTB against the profile first: memory banks, splash

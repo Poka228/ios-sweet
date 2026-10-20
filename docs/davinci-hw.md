@@ -208,9 +208,15 @@ partition.
 The stock `dtbo` dump (746,917 bytes, Android dt_table v0) contains three
 full overlays with `qcom,board-id` **39, 40 and 41** (downstream 39 = the
 dumped unit). The base DTB has `__symbols__` and the overlays carry
-`__fixups__`, so ABL can apply them normally. `dtb/boot_unpacked/dtb` in
-this repo is the extracted `qcom,sdmmagpie` base; ABL merges the phone's
-dtbo onto it exactly as for a stock boot.
+`__fixups__`, so ABL can apply them normally. Extract the base with
+
+```sh
+python3 tools/unpack_bootv2.py dtb/davinci-boot.img dtb/boot_unpacked --scan-dtb
+cp dtb/boot_unpacked/dtb-01.dtb dtb/boot_unpacked/dtb
+```
+
+`dtb/boot_unpacked/dtb` in this repo is that extracted `qcom,sdmmagpie`
+base; ABL merges the phone's dtbo onto it exactly as for a stock boot.
 
 ---
 
