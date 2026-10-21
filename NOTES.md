@@ -1,6 +1,53 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, davinci-touch6 boot log read)
+## Agent handoff / active work (2026-10-21, actdiag boot log read)
+
+**STATE: `actdiag` (same kernel as `touch6`, but `sweettouchdelay=30` +
+`sweetscan=mobileactivationd`) got further than `touch6`, touch finally STARTED, and then the
+console went silent at exactly the touch MMIO step.** This boot did **not** reset — it hung
+(all AKS/backboardd churn is dense right up to the last line, then nothing).
+
+**actdiag log:** `logs/boot.txt` (backup `/tmp/opencode/boot-actdiag.txt`), 1750 lines,
+SHA256 `fc230376b76a2255bf8000cab155c13d74bf6a4dfd3d7cf78018439e5de09fd7`; raw
+`tools/logs/boot.txt.bin` (4,198,400 B) header `total 119407 seq 3` -> complete.
+
+**Findings:**
+1. **The `sweetscan` hook did not fire (bug in my diagnosis, not the kernel).**
+   `mobileactivationd` crashes as `CRASH mobileactivation[...]`, and patch 0051 matches the
+   `sweetscan` list against **`p_comm`**, which is capped at `MAXCOMLEN`=16 -> the comm is
+   `mobileactivation` (no trailing `d`). So `sweetscan=mobileactivationd` matched nothing and
+   no `STR` lines were printed. **Use `sweetscan=mobileactivation` (or `sweet_*`).**
+2. **`mobileactivationd` crashed only 3x here** (pids 115, 182, 202) vs 11x in `touch6`, at
+   the **same** instruction (in-binary offset `0x1f504`, i.e. `0x1001bf504 = brk #0x1`).
+   Fewer crashes + longer life = the boot is progressing further.
+3. **Touch started at t=30 s and the log ends the instant it begins MMIO:**
+   line 113 `SWEET TOUCH: starting in 30 s`; line 1750 (the **last** line)
+   `SWEET TOUCH: mapping GCC/TLMM/SE7`. There is **no** `SWEET TOUCH: gcc vote=` line, no
+   `MMIO mapping failed`, no `TLMM reset=`, no `RPMh` line. So execution stops in
+   `ml_io_map()` or in the first MMIO access inside `touch_clocks()`.
+4. **The addresses are correct** (checked against `docs/davinci-hw.md`): GCC `0x00100000`,
+   TLMM `0x03400000`, SE7 `0xa84000` all match `sdmmagpie.dtsi`. `st.tlmm_pa` comes from the
+   ADT `tlmm-base` (0x03400000 for davinci).
+5. **Caveat (observation vs inference):** in the *earlier* (pre-fix) boot, touch reached
+   `ldoc6 RPMh enable failed 22`, i.e. mapping/clocks/SE-init/TLMM all worked there. So a
+   touch-code hang is *not* a certainty — the machine may simply be dying at that moment.
+   The abrupt silence right at the first MMIO access is suggestive but **needs one more run
+   to confirm** (see NEXT).
+
+**NEXT (in order):**
+1. **Decisive test: boot the same `actdiag` image again with `sweettouch=0` added.** If it
+   still goes silent at the same stage, touch is innocent (machine dies on its own ~30-90 s
+   in). If it gets further / behaves like `touch6`, touch's MMIO is wedging the SoC.
+   Also fix the scan arg: `sweetscan=mobileactivation` (16-char comm, no `d`).
+2. **Get the mobileactivationd assert text**: rebuild with
+   `sweetscan=mobileactivation,SpringBoard,backboardd` so the next crash prints `STR ...`
+   lines (patch 0051/0053 print the dying process's heap strings).
+3. Consider `sweetusb=2` (live USB console over UDP, `shim/out/shim-boot-davinci-usb.img`
+   pattern) to capture the exact last words and whether the machine hangs vs resets.
+4. Symbolication: only shared-cache frames need `ipsw` (not buildable here); in-binary frames
+   are resolved with `llvm-objdump` on `/tmp/opencode/rootchk/usr/libexec/mobileactivationd`.
+
+## Agent handoff (2026-10-21, davinci-touch6 boot log read)
 
 **STATE: `touch6` (touch fix + `cpus=6`) boots much further than the `cpus=1` image, but the
 phone still never reaches the home screen and then RESETS** (screen: the Apple logo dims at
