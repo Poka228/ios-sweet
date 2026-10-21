@@ -10,4 +10,7 @@ research/
 shim/out/
 xnu/out/
 xnu/out-*/
+# built root images (17 GiB raw + 12 GiB sparse; never commit these)
+out/
+build/*.log
 __pycache__/
