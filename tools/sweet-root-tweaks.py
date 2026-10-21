@@ -93,9 +93,23 @@ def find_container(root, kind, identifier):
 # UUID of the com.apple.mobileactivationd system container. On iOS this lives
 # on the data volume and is created by containermanagerd; our image is a single
 # volume with no /private/var/containers at all (mkiosroot.sh only copies the
-# OS root), so the container and its metadata are seeded here with the same
-# UUID the working sweet image v14 used, so find_container() locates it.
+# OS root), so the container has to be seeded here.
+#
+# containermanagerd resolves the container to a UUID derived from the
+# identifier (a keyed hash, not reproducible offline). On davinci that runtime
+# UUID is 7D5F4CDD-1529-4133-9E26-8E449AFC95B3 and it is IDENTICAL in every
+# boot: mobileactivationd then does setResourceValue:NSURLIsExcludedFromBackupKey
+# on the container path, that path did not exist (only the old D90C94C4-... was
+# seeded), the call failed, it threw and trapped at brk #0x1 -> the daemon
+# never answers MadGate getActivationState -> SBLockdownManager
+# _setupActivationState blocks SpringBoard's main thread forever (proved by
+# ipsw symbolication of the t200 sampler stack, NOTES.md 2026-10-21).
+#
+# Seed the container at BOTH UUIDs so whichever one containermanagerd computes
+# finds an existing, correctly-owned directory. D90C94C4-... is what the working
+# sweet image v14 used and is kept so find_container() still locates the ark.
 MOBILEACTIVATIOND_UUID = 'D90C94C4-F94E-4FCF-8A28-A93BE3846D8E'
+MOBILEACTIVATIOND_RUNTIME_UUID = '7D5F4CDD-1529-4133-9E26-8E449AFC95B3'
 
 
 def make_system_container(root, uuid, identifier):
@@ -122,16 +136,24 @@ def activation(root):
     c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
     if c is None:
         c = make_system_container(root, MOBILEACTIVATIOND_UUID, 'com.apple.mobileactivationd')
-    d = os.path.join(c, 'Library/internal')
-    os.makedirs(d, exist_ok=True)
-    os.chown(d, MOBILE, MOBILE)
-    os.chmod(d, 0o755)
-    save(os.path.join(d, 'data_ark.plist'), {
+    # Also seed the UUID containermanagerd resolves at runtime: the daemon does
+    # setResourceValue:NSURLIsExcludedFromBackupKey on THAT path and traps when
+    # it is missing (see MOBILEACTIVATIOND_RUNTIME_UUID above).
+    if find_container(root, 'Data/System', MOBILEACTIVATIOND_RUNTIME_UUID) is None:
+        make_system_container(root, MOBILEACTIVATIOND_RUNTIME_UUID,
+                              'com.apple.mobileactivationd')
+    ark = {
         '-ActivationState': 'Activated', '-BrickState': False,
         '-BuildVersion': BUILD, '-ProductVersion': VERSION,
         '-DataMigrationCompleted': True, '-PreSydroDataMigrationCompleted': True,
-    }, MOBILE, MOBILE, 0o600)
-    print('data ark', d)
+    }
+    for uuid in (MOBILEACTIVATIOND_UUID, MOBILEACTIVATIOND_RUNTIME_UUID):
+        d = os.path.join(root, 'private/var/containers/Data/System', uuid, 'Library/internal')
+        os.makedirs(d, exist_ok=True)
+        os.chown(d, MOBILE, MOBILE)
+        os.chmod(d, 0o755)
+        save(os.path.join(d, 'data_ark.plist'), ark, MOBILE, MOBILE, 0o600)
+        print('data ark', d)
 
 
 def audio(root):

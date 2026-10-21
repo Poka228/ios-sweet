@@ -39,15 +39,77 @@ image's `dyld_shared_cache_arm64*` to a writable dir (a background copy to `/tmp
 was started) and use `tools/sweet-crash.py /tmp/opencode/dsc/dyld_shared_cache_arm64 <image
 root> <report>` to resolve the shared-cache frames.
 
+**SYMBOLICATION DONE — the block is FOUND (this is the answer, not a guess).**
+`ipsw dyld a2s` on the `t200` sample-0 stack (slide `0x3b3ac000`) resolves:
+
+- **SpringBoard t0 (main thread) — blocked in a synchronous XPC call to mobileactivationd:**
+  ```
+  -[SBLockdownManager brickedDevice]
+    -[SBLockdownManager lockdownState]
+      -[SBLockdownManager _setupActivationState]          0x1c5991ab0
+        MAEGetActivationStateWithError                    0x1c90d3880
+          _getActivationState                             0x1c90d2178
+            -[MadGate getActivationState:]                0x1c90cddf4   <-- sync XPC
+              -[NSXPCConnection _sendInvocation:...]       0x1811a5cb0
+                __NSXPCDistantObjectSimpleMessageSend1     0x1811a461c
+                  xpc_connection_send_message_with_reply_sync  0x1d1bee0ec
+                    dispatch_mach_send_and_wait_for_reply  0x18db6a308  <-- BLOCKED HERE
+                      mach_msg_trap
+  ```
+  So SpringBoard's main thread is **NOT** in `-[BKSSystemShellService _checkIn]` (the old
+  guess). It is stuck in `-[SBLockdownManager _setupActivationState]`, which does a
+  **synchronous XPC query to `MadGate` (the `MobileActivation` XPC client) for the activation
+  state** and **never gets a reply**.
+- **backboardd t0 is IDLE**, a normal `CFRunLoopRun` main thread (`_CFRunLoopServiceMachPort`
+  -> `_CFRunLoopRun` -> `_CFRunLoopRunSpecific` -> `start`). It has nothing to do; the display
+  is off, so there is nothing to render.
+
+**Why no reply:** the `MadGate` query is answered by **`com.apple.mobileactivationd`** (its
+launchd plist `MachServices` = `com.apple.mobileactivationd.lockdown`). That daemon **crashes
+instantly every launch** at `0x1001bf504 = brk #0x1` (patch 0051/0053 evidence), so it never
+serves the request. Its crash is `-[NSURL setResourceValue:@YES
+forKey:NSURLIsExcludedFromBackupKey]` failing on **its own system container**, whose runtime
+UUID is `7D5F4CDD-1529-4133-9E26-8E449AFC95B3` but whose seeded UUID is
+`D90C94C4-F94E-4FCF-8A28-A93BE3846D8E` (see the "mobileactivationd assert" section).
+
+**This closes the causal chain (was previously three separate "benign" facts):**
+```
+container UUID mismatch -> mobileactivationd setResourceValue fails -> brk #0x1 crash
+  -> MadGate getActivationState XPC never replies
+    -> SBLockdownManager _setupActivationState blocks SpringBoard's main thread forever
+      -> no shell check-in -> no scene -> display auto-locks/off -> "blackness"
+```
+So **the mobileactivationd crash is NOT benign after all** (the earlier "benign" verdict came
+from sweet reaching the home screen *while* it looped; the stack now proves SpringBoard is
+sitting in the activation XPC the whole time). The display-off is a *symptom*.
+
+**BEST FIX (cheap, testable, no kernel change): make the container UUID match.**
+- The runtime UUID `7D5F4CDD-1529-4133-9E26-8E449AFC95B3` is **identical in the `t200` and
+  `c1` logs**, i.e. it is a deterministic keyed hash of the identifier (MCM's
+  keyed-SHA1), not random.
+- `tools/sweet-root-tweaks.py` seeds `MOBILEACTIVATIOND_UUID = D90C94C4-...` (copied from the
+  old sweet v14 image). **Change it to `7D5F4CDD-1529-4133-9E26-8E449AFC95B3`** (and keep the
+  `data_ark.plist` seed), rebuild the root image, and mobileactivationd should find/own its
+  container, skip the failing `setResourceValue`, and actually answer `getActivationState`.
+- Secondary, still worth doing: provide an `os_crash_function` symbol so future asserts print
+  a readable message instead of a bare `brk`.
+
 **NEXT (in order):**
-1. **Symbolicate the SpringBoard t0 and backboardd t0 stacks** with `ipsw dyld a2s` and
-   compare with sweet's home-screen boot to find the exact blocking call (is it
-   `-[BKSSystemShellService _checkIn]`?).
-2. **Compare against sweet:** the same image + `cpus=6` reaches the home screen on sweet, so
-   the block is davinci-specific — likely in the check-in path (a kernel/IOKit call that
-   never returns on davinci).
-3. Keep the `sweettouch=0` variant in reserve to close out touch entirely if needed.
-4. Any further destructive flash only with explicit user confirmation.
+1. **Edit `tools/sweet-root-tweaks.py`: `MOBILEACTIVATIOND_UUID = '7D5F4CDD-1529-4133-9E26-8E449AFC95B3'`**
+   (verify the same repair is needed for any other seeded containers whose runtime UUID
+   differs), rebuild the 16 GiB root image, reflash `userdata` (DESTRUCTIVE - ask the user
+   first), and boot `shim/out/shim-boot-davinci-c1-t200.img`.
+2. Expect: mobileactivationd survives -> SpringBoard's `_setupActivationState` returns ->
+   shell check-in completes -> home screen. Watch `SWEET AKS`/`CRASH mobileactivation` counts
+   drop to ~0 and SpringBoard t0 leave the `MadGate` stack.
+3. Add an `os_crash_function` stub to get readable asserts (optional, after step 1).
+4. Keep the `sweettouch=0` variant in reserve to close out touch entirely if needed.
+5. Any further destructive flash only with explicit user confirmation.
+
+**Symbolication recipe (reusable):** `/tmp/opencode/ipsw` (prebuilt 3.1.739) with the image's
+`dyld_shared_cache_arm64*` copied to a writable dir (`/tmp/opencode/dsc`); resolve a frame with
+`ipsw dyld a2s /tmp/opencode/dsc/dyld_shared_cache_arm64 <hex(addr - slide)>`. Slides:
+SpringBoard/backboardd `0x3b3ac000` (mh `0x100d60000` / `0x100a14000`).
 
 ## Agent handoff (2026-10-21, cpus=1 + touch fix: RPMh vote works, hang in wait)
 
