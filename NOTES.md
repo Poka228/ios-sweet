@@ -34,6 +34,17 @@ idea cannot break the cycle. The os_feature flag is the real lever.
   (`0x181c25a30: cbz x8`), the XPC is also skipped — but that requires breaking
   MobileActivation.framework, not needed.
 
+**Safety check (done): the flag only affects vendor-identifier computation.**
+`+[LSHRNSupport setFeatureFlagOverride:]` (`0x181cb8788`) is the only writer of the tri-state
+override at `[0x1dcdd22a8]`: `0` = unset -> query `os_feature_enabled`; `1` = forced true;
+`-1` = forced false (`cmp w2,#0; cneg`). Nothing on a stock boot calls it, so the query path
+is what runs and the plist flag is honoured. `+[LSHRNSupport deviceConfiguredForHRN]` has
+exactly **two** callers (both `objc_msgSend` from
+`-[_LSDeviceIdentifierCache getIdentifierOfType:…]_block_invoke`, `0x181c1d30c` and
+`0x181c1d33c`), so enabling HRN cannot divert any other daemon. The cached *answer* is the
+separate byte `[0x1dcdd229d]`, touched only inside `deviceConfiguredForHRN` and
+`invalidateCache`.
+
 os_feature flags in iOS 16: `/System/Library/FeatureFlags/Domain/<Domain>.plist`
 (`<Feature> -> {Enabled: true}`; `FeatureFlagsExample.plist` confirms the format) plus
 `/System/Library/FeatureFlags/Global.plist`, folded into `com.apple.featureflags.shm` by
@@ -160,8 +171,9 @@ which is in the HRN activation-record XPC to mobileactivationd — the three-way
 the top of this file. The os_feature fix removes lsd t5 from the cycle.
 
 **NEXT (in order):**
-1. `img2simg out/ios16-root.img out/ios16-root.simg` (detached, >15 min) to package the
-   HRN-tweaked image.
+1. `img2simg out/ios16-root.img out/ios16-root.simg` — DONE (12,145,324,344 B, same size as
+   before, header `total_blks 4194304 × 4096 = 16 GiB`, `total_chunks 27812`). Raw image
+   re-mounted read-only and both plists re-read from disk: `HRN -> Enabled: true` present.
 2. Ask the user for explicit confirmation, then
    `fastboot flash -S 512M userdata out/ios16-root.simg` and
    `fastboot boot shim/out/shim-boot-davinci-c1-lsd2.img` (same cmdline as `c1-lsd`; SHA
