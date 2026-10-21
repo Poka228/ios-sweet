@@ -26,7 +26,10 @@ echo userdata block device: %DEV%
 for /f "usebackq delims=" %%s in (`adb shell blockdev --getsize64 %DEV%`) do set BYTES=%%s
 echo partition size: %BYTES% bytes
 
-set /a SKIP=%BYTES%/4096 - 1025
+REM cmd.exe set /a is 32-bit and overflows on the ~51 GiB partition size, so
+REM compute the block offset on the phone's shell (64-bit) instead.
+for /f "usebackq delims=" %%k in (`adb shell "b=$(blockdev --getsize64 %DEV%); echo $((b / 4096 - 1025))"`) do set SKIP=%%k
+if "%SKIP%"=="" (echo Error: could not compute the block offset & exit /b 1)
 echo reading blocks %SKIP%.. (last 4100 KiB)
 
 adb exec-out "dd if=%DEV% bs=4096 skip=%SKIP% count=1025 2>/dev/null" > "%BIN%"
