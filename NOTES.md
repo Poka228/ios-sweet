@@ -1,6 +1,62 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, scan boot: deadlock re-confirmed, cpus=6 regression)
+## Agent handoff / active work (2026-10-21, cpus=1 + touch fix: RPMh vote works, hang in wait)
+
+**STATE: a `cpus=1` boot with the touch fix ran touch ALL THE WAY through for the first
+time, and the RPMh `ldoc6` vote SUCCEEDED — the machine then went silent inside the RPMh
+completion wait.** This is the first time davinci's touch power path worked end to end, and
+it strongly suggests the touch path is now what kills the machine (the old code failed with
+`EINVAL` and bailed *before* the wait, which protected the boot).
+
+Log: `logs/boot.txt`, 1026 lines, SHA256
+`4c994a1fd64332fad4c759d08f3ba19a90fbf1fb9143cbeabae7fb7a5f22ce2a`; raw ring `total 77006
+seq 3`, complete. Image `shim/out/shim-boot-davinci-c1.img` (SHA256 `e55d43ac…`), cmdline
+`cpus=1 sweettouchdelay=30 sweetsample=SpringBoard,backboardd,datamigrator,mobileactivation
+sweetscan=mobileactivation,SpringBoard,backboardd`.
+
+**The tail of the log (the whole touch sequence, first time complete):**
+```
+SWEET TOUCH: mapping GCC/TLMM/SE7            (t=30 s)
+SWEET TOUCH: gcc vote=0x41bc0000 rcg=0 cfg=0x100000 dfs=0x21
+SWEET TOUCH: se7 fw=0x303 proto=3 status=0 tx=0x20102964 rx=0x20104800 ios=0
+SWEET TOUCH: packing tx=0x7f8fe/0xffefe rx=0x7f8fe/0xffefe gran=0
+SWEET TOUCH: TLMM reset=0 irq=0 pwr=0; voting ldoc6 3100 mV through RPMh
+SWEET RPMH: rsc=0x18220000 tcs=0x18220d00 DRV=2 id=0x10100 ... TCS=8 ncpt=16
+SWEET RPMH: cmd-db ... pa=0x85f20000 ...
+SWEET RPMH: ldoc6 addr=0x41600 slave=4 aux-version=0x100 priority=0:0
+SWEET RPMH: ACTIVE TCS0 idle=0x1 control=0 enable=0 wait=0
+SWEET RPMH: ACTIVE TCS1 idle=0x1 control=0 enable=0 wait=0
+SWEET RPMH: TCS0 ACTIVE 3100 mV mode=7 enable=1 irq-enable=0x1      <-- last line
+```
+- **The `ldoc6` RPMh fix is CONFIRMED working** (`TCS0 ACTIVE 3100 mV enable=1`; the old
+  kernel printed `ldoc6 RPMh enable failed 22`). So patch 0062's relaxed guard is correct.
+- The next print in the code is `SWEET RPMH: TCS%u done=...` (patch 0062, line 419) after
+  the completion wait loop (`for us < RH_TIMEOUT_US(100000) { read IRQ/STATUS/CMD_STATUS;
+  delay(1); }`). **It never appears** -> the machine dies **inside the RPMh completion wait
+  loop** (`bsd/dev/sweet_rpmh.c`), or an immediate MMIO read there stalls the SoC.
+
+**Why this matters:** previously (old kernel, `ldoc11` guard) davinci's `ldoc6` was **rejected
+with EINVAL** and touch bailed *before* the wait loop (`ldoc6 RPMh enable failed 22; probes
+skipped`) — and that boot survived ~11.5 min. Now the vote succeeds and the machine dies at
+~30-40 s, right in the wait. That is the single clearest correlation we have.
+
+**Still true from before:** `mobileactivationd` (2 crashes here) and the backboardd
+`IOAcceleratorES -> 0 found` loop remain benign (both happen on sweet's home-screen boot).
+The kernel sampler fired **0 samples** again (starts at 90 s) -> the machine dies before 90 s.
+
+**NEXT (in order) — image BUILT: `shim/out/shim-boot-davinci-c1-t200.img`
+(`97bf2efb5ec9588de8a721b12cada4ca29f03877d9da5d2ea9d23ba5db74ebae`):**
+1. **Boot `shim-boot-davinci-c1-t200.img`** (`cpus=1`, **`sweettouchdelay=200`**). Touch now
+   starts at 200 s, long after the 90 s sampler. This one boot answers both:
+   - does the machine survive to 200 s with touch not yet running (=> touch is the killer)?
+   - if it survives, the sampler (90 s) finally prints the frozen SpringBoard/backboardd/
+     datamigrator stacks => the migration/`_checkIn` deadlock.
+2. If the machine dies at ~the same ~30-40 s even with touch at 200 s, touch is exonerated
+   and the reset is elsewhere (then add a PMIC PON reset-reason read and/or `sweettouch=0`).
+3. Rebuild a variant with `sweettouch=0` if needed to confirm.
+4. Any further destructive flash only with explicit user confirmation.
+
+## Agent handoff (2026-10-21, scan boot: deadlock re-confirmed, cpus=6 regression)
 
 **STATE: the `mobileactivationd` crash and the backboardd `IOAcceleratorES -> 0 found`
 loop are BOTH benign (they also happen on sweet, which reaches the home screen). The real
