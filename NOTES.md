@@ -1,6 +1,55 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, cpus=1 + touch fix: RPMh vote works, hang in wait)
+## Agent handoff / active work (2026-10-21, t200 boot: backboardd renders, SpringBoard stuck)
+
+**STATE: the `cpus=1 sweettouchdelay=200` boot SURVIVED past 90 s (the sampler fired) and
+shows backboardd actually RENDERING (3-4 composite swaps) before the display is turned off.
+The blocker is still the SpringBoard-side stall, now with live stacks.** Touch was never
+reached (`starting in 200 s`; the log window is shorter than 200 s of runtime), so **touch is
+NOT the cause of this boot's end**.
+
+Log: `logs/boot.txt`, 2239 lines, SHA256
+`7c32a4b1eaeecf891c15322401d57cbf775e18475c6eb2af9be7993601bea6ff`; raw ring `total 166389
+seq 15`, complete. Image `shim/out/shim-boot-davinci-c1-t200.img`
+(`97bf2efb…`). User report: Apple logo, then black again.
+
+**What this boot proved:**
+1. **backboardd renders.** `SWEET FB: display on` -> opened `IOCoreSurfaceRoot` ->
+   `SWEET SURF: backboardd create id 2/id 3 1125x2436` -> `SWEET FB: swap 2/3/4 layer 0
+   surface 2/3`. Surfaces and composition work.
+2. **Then `SWEET FB: display off`** (line 1632), i.e. iOS idles/powers the display down;
+   that is the "blackness" the user sees. It happens after the first frames, before the
+   check-in completes.
+3. **The kernel sampler fired: `SMP --- sample 0` at line 1903** (t=90 s). Stacks captured
+   for `backboardd[56]` (18 threads) and `SpringBoard[26]` (11 threads). Almost every thread
+   is parked in the common Mach wait `pc 0x1fd9bd030 lr 0x1fd9ceb18` (`mach_msg_trap`).
+   SpringBoard **t0 (main)** has a deep stack through shared-cache frames
+   (`0x1c8f16308 0x1c8f16694 0x20cf9a0ec 0x1bc5b8224 0x1bc551cb0 0x1bc5506e0 0x1bc55061c
+   0x204479df4 0x20447e178 0x20447f880 0x200d3dab0 0x200d3dc14 0x200d3dbe4 0x200c9b…`) —
+   needs `ipsw` symbolication (see below).
+4. `com.apple.datamigrator` is exec'd **4 times** (lines 623/1620/1870/2052) — it keeps
+   relaunching, matching the "migration never completes" gate.
+5. `mobileactivationd` crashes again (same benign `brk`); the backboardd `IOAcceleratorES ->
+   0 found` loop continues (benign, same on sweet).
+
+**Symbolication tooling unblocked:** `ipsw` could not be built from source here (go.mod wants
+go1.27), but a **prebuilt Linux binary works**: `ipsw 3.1.739` downloaded to
+`/tmp/opencode/ipsw` (release `blacktop/ipsw`, `ipsw_3.1.739_linux_x86_64.tar.gz`). Copy the
+image's `dyld_shared_cache_arm64*` to a writable dir (a background copy to `/tmp/opencode/dsc`
+was started) and use `tools/sweet-crash.py /tmp/opencode/dsc/dyld_shared_cache_arm64 <image
+root> <report>` to resolve the shared-cache frames.
+
+**NEXT (in order):**
+1. **Symbolicate the SpringBoard t0 and backboardd t0 stacks** with `ipsw dyld a2s` and
+   compare with sweet's home-screen boot to find the exact blocking call (is it
+   `-[BKSSystemShellService _checkIn]`?).
+2. **Compare against sweet:** the same image + `cpus=6` reaches the home screen on sweet, so
+   the block is davinci-specific — likely in the check-in path (a kernel/IOKit call that
+   never returns on davinci).
+3. Keep the `sweettouch=0` variant in reserve to close out touch entirely if needed.
+4. Any further destructive flash only with explicit user confirmation.
+
+## Agent handoff (2026-10-21, cpus=1 + touch fix: RPMh vote works, hang in wait)
 
 **STATE: a `cpus=1` boot with the touch fix ran touch ALL THE WAY through for the first
 time, and the RPMh `ldoc6` vote SUCCEEDED — the machine then went silent inside the RPMh
