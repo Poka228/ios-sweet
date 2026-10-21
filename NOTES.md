@@ -1,18 +1,79 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, davinci-touch6 image built)
+## Agent handoff / active work (2026-10-21, davinci-touch6 boot log read)
 
-**STATE: the touch fix is now built into a kernel and packed into a boot image ready to
-boot.** The Mi 9T still last booted `cpus=1` and hung on the Apple logo (userspace deadlock,
-analysis below). The current un-booted image is `shim/out/shim-boot-davinci-touch6.img`
-(SHA256 `1bfc7ec1…`, kernel `928dae4f…`) = touch-RPMh fix + **`cpus=6`** + wider sampler.
+**STATE: `touch6` (touch fix + `cpus=6`) boots much further than the `cpus=1` image, but the
+phone still never reaches the home screen and then RESETS** (screen: the Apple logo dims at
+~2 fps and fades out, `SWEET FB: display off`). The reset leaves **no panic text** in a
+**complete** log, so it is an external reset (watchdog / TZ), not a kernel panic. The next
+real problem is the `mobileactivationd` crash loop, and touch never gets a chance to run
+(its init is delayed 120 s; the phone resets first).
 
-**RESULT of the first `touch6` boot (user report, 2026-10-21): after the Apple logo the
-screen went dark and then a PANIC appeared (not a silent logo hang).** So `cpus=6` + the
-touch fix changed the failure mode from "userspace deadlock on the logo" to "panic". The
-panic text/PC is not yet captured; the console ring should hold it. Next: pull the log
-(recovery + `tools\sweet-log-pull.cmd logs\boot.txt`, or a photo of the panic) and identify
-the panic site.
+**Boot log (superseded the old one):** `logs/boot.txt` = `tools/logs/boot.txt`,
+2186 lines / 160,475 B, SHA256 `3edc0698e6c847f85aede25e688d9346ceb25c666dfc808a625775c6a0dd04ef`.
+Raw ring `tools/logs/boot.txt.bin` (4,198,400 B) header `magic SWEETLOG ver 1 ring 4194304
+total 160720 seq 11` -> `total < ring`, so the log is **entire** (nothing was overwritten).
+
+**What improved vs the `cpus=1` boot:**
+- `SWEET CPU: 6/6 CPUs initialized, SGI1 verified` -> the `cpus=6` change took effect.
+- Boot reaches far deeper: 454 `exec` lines, **201 unique daemons** (backboardd fully up with
+  all DualSense/DualShock HID plugins loaded, `SWEET SURF: SpringBoard sel 40`, `coredaemon`,
+  `thermalmonitord`, `CommCenterMobileHelper`, `coreidvd`, `appstored`, ...).
+- All 4 backboardd swaps still render at 1125x2436 (BRGA), then `SWEET FB: display off`.
+
+**What is still wrong (the two blockers):**
+1. **`mobileactivationd` crash loop — now pinned to a single instruction.** `exec
+   mobileactivationd` -> `CRASH mobileactivation sig 5 code 0x600000001 slide 0x146fc000`
+   repeated **11x** (pids 138, 182, 202, 209, 222, 225, 228, 231, 234, 237, 240), each
+   followed by 5x `SWEET AKS: ReportCrash sel 17`. `sig 5` = SIGTRAP; `reason ns 2 code 0x5`.
+   Every crash has the **same in-binary offset**: `sub - mh = 0x1bf504`, i.e. vmaddr
+   `0x1001bf504`. Disassembling the image's `/usr/libexec/mobileactivationd` (mounted at
+   `/tmp/opencode/rootchk`) shows that address is literally **`d4200020  brk #0x1`**
+   (`llvm-objdump -d --start-address=0x1001bf4e0 --stop-address=0x1001bf540`). The `brk` is
+   preceded by logging calls whose string arg is `"main"` (`adr x0, 0x10020be7b`), so it is
+   an **assertion/`__builtin_trap()` inside `main`**, not a normal exception: the process
+   deterministically kills itself at startup. `bt0` is the same helper (offset `0x50624`),
+   `bt1` `0x1b8d20344` is in the shared cache (libsystem abort path). mobileactivationd links
+   `MobileKeyBag`, `Security`, `CryptoTokenKit`; the boot also logs
+   `SWEET AKS: securityd sel 10 ... -> 0xe00002c7`, so the trap is most plausibly a fatal
+   keybag/activation-state check. **This is the top item to fix.**
+2. **The SpringBoard/backboardd stall is unchanged.** At `SMP --- sample 0` (the only sample
+   that fired, at 90 s) SpringBoard t0 and backboardd t0 are both parked in the same Mach
+   message wait (`pc 0x1d6d0d030 lr 0x1d6d1eb18`), and backboardd never composites again
+   after swap 4. Same signature as the `cpus=1` log (different slide, same park).
+3. **Touch never ran.** `SWEET TOUCH: starting in 120 s` (patch 0060/0082 delayed worker) but
+   the machine resets before t=120 s, so the touch fix is **still unverified on hardware**.
+   Once the reset is solved, touch can be tested (or lower `sweettouchdelay`).
+
+**Interpretation (observation vs guess):**
+- Observed: complete log, no `panic`, no `SIGKILL of initproc`; last line is a
+  `mobileactivation` crash; screen fades and machine resets. This matches the documented
+  external reset for sweet (NOTES "cannot reset the SoC itself"; watchdog or TZ/XPU).
+- Guess: the `mobileactivationd` SIGTRAP loop (no AKS keybag access, `securityd sel 10 ->
+  0xe00002c7`) keeps the activation/`_checkIn` gate closed, and something (watchdog/TZ) then
+  resets the phone. Needs confirmation.
+
+**NEXT (in order):**
+1. **Fix the `mobileactivationd` `brk #0x1` at `0x1001bf504`.** It traps inside its `main`
+   right at startup, before any AKS call. Next sub-steps: (a) find which fatal check that
+   `brk` guards — disassemble further back for the branch/compare that reaches it, and pull
+   the register state from a crash if any register holds a status code; (b) check the image's
+   `mobileactivationd` entitlements/signature and whether a required file
+   (`/var/mobile/Library/...`, activation record, `MobileKeyBag` state) is missing; (c) compare
+   with sweet's old log — mobileactivationd did **not** crash there (only `driverkitd sig 9`),
+   so something in the image/seed or in scheduling differs.
+2. Re-run with `sweettouchdelay=30` (keep `cpus=6`) so touch can actually probe before the
+   reset, to finally verify the RPMh `ldoc6` fix.
+3. Confirm the reset source: the log ends with no panic; if it is the Qualcomm watchdog or a
+   TZ/XPU violation (as documented for sweet), look for a missing check-in / unhandled fault.
+4. Symbolication is limited locally (`ipsw` can't be built here, see below). For
+   `mobileactivationd` all frames are in-binary offsets, so `llvm-objdump` on
+   `/tmp/opencode/rootchk/usr/libexec/mobileactivationd` is enough; only shared-cache frames
+   like `bt1 0x1b8d20344` need `ipsw`.
+
+**Superseded note (kept for history):** the earlier reading that the first `touch6` boot
+"panicked" was wrong; the user's later detail ("the logo dims at ~2 fps and fades out") plus
+the panic-free complete log show a reset, not a panic.
 
 The full console (`logs/boot.txt`, 1940 lines / 147 KB; raw ring at
 `tools/logs/boot.txt.bin`, ring header `total 147554 < 4 MiB`, flush #69, so this is the
