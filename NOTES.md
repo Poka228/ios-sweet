@@ -7,6 +7,13 @@ boot.** The Mi 9T still last booted `cpus=1` and hung on the Apple logo (userspa
 analysis below). The current un-booted image is `shim/out/shim-boot-davinci-touch6.img`
 (SHA256 `1bfc7ec1…`, kernel `928dae4f…`) = touch-RPMh fix + **`cpus=6`** + wider sampler.
 
+**RESULT of the first `touch6` boot (user report, 2026-10-21): after the Apple logo the
+screen went dark and then a PANIC appeared (not a silent logo hang).** So `cpus=6` + the
+touch fix changed the failure mode from "userspace deadlock on the logo" to "panic". The
+panic text/PC is not yet captured; the console ring should hold it. Next: pull the log
+(recovery + `tools\sweet-log-pull.cmd logs\boot.txt`, or a photo of the panic) and identify
+the panic site.
+
 The full console (`logs/boot.txt`, 1940 lines / 147 KB; raw ring at
 `tools/logs/boot.txt.bin`, ring header `total 147554 < 4 MiB`, flush #69, so this is the
 **entire** console from boot to end) shows a healthy kernel and userspace bring-up, then a
