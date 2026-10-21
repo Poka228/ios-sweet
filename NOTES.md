@@ -54,16 +54,16 @@ total 160720 seq 11` -> `total < ring`, so the log is **entire** (nothing was ov
   resets the phone. Needs confirmation.
 
 **NEXT (in order):**
-1. **Fix the `mobileactivationd` `brk #0x1` at `0x1001bf504`.** It traps inside its `main`
-   right at startup, before any AKS call. Next sub-steps: (a) find which fatal check that
-   `brk` guards — disassemble further back for the branch/compare that reaches it, and pull
-   the register state from a crash if any register holds a status code; (b) check the image's
-   `mobileactivationd` entitlements/signature and whether a required file
-   (`/var/mobile/Library/...`, activation record, `MobileKeyBag` state) is missing; (c) compare
-   with sweet's old log — mobileactivationd did **not** crash there (only `driverkitd sig 9`),
-   so something in the image/seed or in scheduling differs.
-2. Re-run with `sweettouchdelay=30` (keep `cpus=6`) so touch can actually probe before the
-   reset, to finally verify the RPMh `ldoc6` fix.
+1. **Boot `shim/out/shim-boot-davinci-actdiag.img`** (same `touch6` kernel, SHA256
+   `3557331bab3b8d6e151602191179e3d8054c5bf4cd8a228569065a0401632f3d`) via `fastboot boot`.
+   It adds `sweetscan=mobileactivationd` (patch 0053 prints the die-ing process's heap strings
+   on SIGTRAP) and lowers `sweettouchdelay` to 30 s so **touch finally probes before the
+   reset**. Expect `STR ...` lines showing the mobileactivationd assertion message / missing
+   path, and `SWEET TOUCH:` lines confirming (or refuting) the RPMh `ldoc6` fix.
+2. **Fix the `mobileactivationd` `brk #0x1` at `0x1001bf504`.** It traps inside its `main`
+   at startup, 11x, before any AKS call (same instruction each time: `d4200020 brk #0x1`,
+   reached through stubs at `__stubs` `0x1001c00xx`). The binary has 1156 `brk` sites (Apple's
+   assertion pattern), so the PC alone is not enough; the `sweetscan` strings are the way in.
 3. Confirm the reset source: the log ends with no panic; if it is the Qualcomm watchdog or a
    TZ/XPU violation (as documented for sweet), look for a missing check-in / unhandled fault.
 4. Symbolication is limited locally (`ipsw` can't be built here, see below). For
