@@ -202,7 +202,8 @@ the top of this file. The os_feature fix removes lsd t5 from the cycle.
    Raw image re-mounted rw (`force`), tweak re-applied, both plists re-read:
    `HRN -> {Enabled: True}` (domain) and `DeviceManagementClient.HRN -> {Enabled: True}`
    (Global), matching the shipped leaf form; unmounted, fsck clean, re-`img2simg`'d.
-   New sparse SHA256 in `out/ios16-root.simg.sha256`.
+   New sparse SHA256 `a2a0a1c7ba2c53d3b0b39bd43c46d54019398a3241e0b5912e83cac965ed0fff`
+   (also in `out/ios16-root.simg.sha256`).
 2. Ask the user for explicit confirmation, then
    `fastboot flash -S 512M userdata out/ios16-root.simg` and
    `fastboot boot shim/out/shim-boot-davinci-c1-lsd2.img` (same cmdline as `c1-lsd`; SHA
