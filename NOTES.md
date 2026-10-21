@@ -1,16 +1,42 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21 late: lsd deadlock ROOT-CAUSED; fix written, not yet booted)
+## Agent handoff / active work (2026-10-21 late: lsd deadlock ROOT-CAUSED; HRN fix re-applied in the CORRECT plist form)
 
 **STATE: the three-way lsd deadlock is fully root-caused and the fix is a one-line
 os_feature flag. `+[LSHRNSupport deviceConfiguredForHRN]` calls
 `os_feature_enabled("DeviceManagementClient", "HRN")`; when that is FALSE it issues the
 blocking activation-record XPC to mobileactivationd (the deadlock). `HRN` is absent from
-the stock `DeviceManagementClient.plist`, so it defaults to false. `tools/sweet-root-tweaks.py`
-now adds `HRN -> Enabled:true` to both the domain plist and Global.plist. Image tweaked,
-fsck clean. NOT yet img2simg'd / flashed.**
+the stock `DeviceManagementClient.plist`, so it defaults to false.**
 
-Correction to the earlier note below: **pre-seeding the lsd identifier cache does NOT avoid
+**FIRST ATTEMPT WAS MALFORMED AND SILENTLY DID NOTHING.** The 2026-10-21 `c1-lsd2` boot
+still deadlocked, and its log (line 629) shows why:
+`init_featureflags[15:209] Error: in file ".../DeviceManagementClient.plist": while reading
+key "DevelopmentPhase": A flag cannot have both Enabled and DevelopmentPhase keys`. So the
+whole `HRN` key was **dropped** and the flag stayed false. Shipped plists use `Enabled` XOR
+`DevelopmentPhase` (e.g. AppStore.plist has `chainlink -> {Enabled:true}` and
+`chainlink_today_condensed -> {DevelopmentPhase:FeatureComplete}`), and the example
+`FeatureFlagsExample.plist` is `{Enabled:true}` alone. `os_features()` now writes
+`{'Enabled': True}` **only** (assigns, so no stale key survives). Image re-tweaked, fsck
+clean, re-`img2simg` in progress; NOT yet flashed.
+
+### c1-lsd2 boot log (2026-10-21, PRE-fix image on the phone)
+`tools/logs/boot.txt`, 1995 lines, SHA256 `0726ce3fad3b2ae734ec82e6adcdf3600228924004d8eb01d2750b8a8dba6036`,
+ring complete (total 144478 < ring 4194304), slide `0x2b778000`. Same deadlock as before,
+now with both lsd threads captured:
+- `lsd` t0: `__LSServerMain +2008` -> `dispatch_once_callout` -> `beginListening_block_invoke
+  +40` -> `performJournalRecovery +88` -> `dispatch_sync_f_slow` -> `DISPATCH_WAIT_FOR_QUEUE`
+  (waiting on the observers queue).
+- `lsd` t1: `-[_LSInstallProgressService restoreInactiveInstalls] +120` ->
+  `dispatch_group_wait_slow`.
+- `mobileactivationd` t0 **and** `SpringBoard` t0 (identical): `_LSContextInitWithOptions` ->
+  `_LSContextInitCommon` -> `__LSCopyServerStore +768` ->
+  `___LAUNCH_SERVICES_WAS_ASKED_TO_PERFORM_BLOCKING_IO_ON_THE_MAIN_QUEUE__` ->
+  `NSXPCDistantObjectSimpleMessageSend1` -> sync XPC (waiting on lsd).
+- New this boot: `CRASH driverkitd[67] sig 9 slave 0x104c90000` and backboardd reached the
+  framebuffer (`SWEET FB: backboardd sel 79 -> 1580`) — i.e. rendering is alive, userspace is
+  not. `driverkitd` SIGKILL is new and worth watching but is not the blocker.
+
+**Correction to the earlier note below: **pre-seeding the lsd identifier cache does NOT avoid
 the HRN call — it is the opposite.** In `getIdentifierOfType:...]_block_invoke` at
 `0x181c1d32c`, if `identifiersOfTypeNotDispatched:` (LSVendors) is **nil** the code jumps to
 `0x181c1d5e8` and returns **without** calling `deviceConfiguredForHRN`; if it is **non-nil**
