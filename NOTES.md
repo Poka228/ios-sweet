@@ -1,10 +1,49 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, scan boot: mobileactivationd assert found)
+## Agent handoff / active work (2026-10-21, scan boot: deadlock re-confirmed, cpus=6 regression)
 
-**STATE: the `scan` image (`sweetscan=mobileactivation,...`) printed the `mobileactivationd`
+**STATE: the `mobileactivationd` crash and the backboardd `IOAcceleratorES -> 0 found`
+loop are BOTH benign (they also happen on sweet, which reaches the home screen). The real
+davinci blocker is the userspace DEADLOCK already analysed in commit `3047517`, and `cpus=6`
+makes it WORSE.** Evidence from this `scan` boot (`logs/boot.txt`, 1794 lines, SHA256
+`92b335f4…`; ring `total 122992 seq 3`, complete):
+
+- **The kernel sampler (patch 0054) fired ZERO samples.** It starts at **90 s** after boot,
+  so the machine **died before 90 s of runtime**. The earlier `cpus=1` boot lived **>= ~11.5
+  min** (samples 0-5, commit `3047517`). So `cpus=6` cut the lifetime from ~11 min to <90 s.
+- **Zero `SWEET FB: swap` lines.** backboardd opened AppleCLCD (`SWEET FB: backboardd sel
+  57`), did the setup selectors (15/22/29/33/79/74) and then only ever retried
+  `IOAcceleratorES -> 0 found` -> it **never composited a single frame**. The `cpus=1` boot
+  at least swapped **4 frames** before deadlocking.
+- **No panic / no assert** anywhere in the log -> the death is external (hardware watchdog /
+  TZ reset), not a kernel panic. `exec DumpPanic` runs and does nothing.
+- All the daemons launch (`exec SpringBoard`, `exec backboardd`, `exec com.apple.datamigrator`
+  twice, `exec progressd`-class jobs); SpringBoard only ever prints `exec SpringBoard` — it
+  never opens the display, i.e. it is sitting in `-[BKSSystemShellService _checkIn]` waiting
+  on backboardd, which holds the shell check-in until data migration ends (the sweet gate,
+  NOTES `3047517`).
+- `mobileactivationd` crashed only **3x** this boot (same `brk #0x1` site), and the
+  `IOAcceleratorES` loop is the documented sweet-benign pattern -> **not the blocker**.
+
+**mobileactivationd crash = benign, do NOT chase it.** The `STR` scan did give its assert
+text (kept below for the record), but it is a relaunch-loop daemon on sweet too (NOTES v12
+handoff: `mobileactivationd (~100/boot, not analysed)` while the home screen was up).
+
+**The real next experiment: `cpus=1` with the corrected `sweetscan`/`sweetsample` names so
+the sampler actually fires and we see the frozen stacks live.** Only difference from sweet's
+home-screen boot (kernel 0069, `cpus=6`) is the board; but on davinci `cpus=6` is a clear
+regression vs `cpus=1`, so the immediate question is *why the secondary A55 cores kill it*
+(PSCI bring-up reports `came alive; SGI1 OK` for mpidr 0x100-0x500). Suggested decisive
+variants (cheap, one boot each):
+1. `cpus=1` + `sweetsample=SpringBoard,backboardd,datamigrator,mobileactivation` +
+   `sweetscan=mobileactivation` (observe the deadlock stacks live, confirm the migration gate).
+2. `cpus=2` (one secondary A55) to see whether a single extra core already shortens life.
+
+### mobileactivationd assert (recorded, benign)
+
+The `scan` image (`sweetscan=mobileactivation,...`) printed the `mobileactivationd`
 assert strings. The crash cause is a USERSPACE container/permission failure, not the kernel
-and not touch:**
+and not touch:
 
 ```
 STR Error Domain=com.apple.MobileActivation.ErrorDomain Code=-1
@@ -47,17 +86,18 @@ coincidence of timing. mobileactivationd crashed 3x here too (same `brk` site).
 `d02883e3fbf39dddb2747bbf291fd3700963e0e467bb90da52acb183117fb7a2`.
 
 **NEXT (in order):**
-1. **Fix the container permission / backup-exclusion failure.** Options, cheapest first:
-   (a) inspect whether our HFS+ + kernel actually implements `setxattr` for
-   `com.apple.metadata:com_apple_backup_excludeItem` and the `UF_NODUMP`/`UF_IMMUTABLE` path
-   `setResourcePropertyForKey` uses; (b) pre-create the runtime UUID container
-   `7D5F4CDD-1529-4133-9E26-8E449AFC95B3` in the image with ownership `mobileactivationd`
-   and the backup-exclusion xattr already set, so the write is a no-op/succeeds;
-   (c) check `tools/sweet-root-tweaks.py` seeding against what MCM expects.
-2. **Provide `os_crash_function`** so future asserts print a real reason instead of a bare
-   `brk`.
-3. Re-confirm the touch `ldoc6` fix once the machine survives long enough (touch ran here only
-   to "starting in 30 s").
+1. **Decisive `cpus=1` sampler boot.** Same kernel, `cpus=1` +
+   `sweetsample=SpringBoard,backboardd,datamigrator,mobileactivation` +
+   `sweetscan=mobileactivation`. This must be the next boot: with `cpus=1` the machine
+   survived ~11.5 min before, so the sampler (90 s) will fire and we finally see the frozen
+   SpringBoard/backboardd stacks (is SpringBoard in `_checkIn`? is `datamigrator` stuck?).
+2. **Then the `cpus=6` regression test:** `cpus=2` (one secondary A55). If life drops from
+   ~11 min (`cpus=1`) to <90 s (`cpus=6`), find why the secondary cores wedge the board.
+3. Add a **PMIC PON reset-reason read** (SPMI PON 0x8xx reason1/reason2 at start) so the
+   external reset is identified instead of inferred. Nothing reads it today.
+4. (Optional, cosmetic) Provide `os_crash_function` so future asserts print a real reason
+   instead of a bare `brk`. Not on the critical path.
+5. Re-confirm the touch `ldoc6` fix once the machine survives past 30 s with the log intact.
 
 ## Agent handoff (2026-10-21, actdiag boot log read)
 
