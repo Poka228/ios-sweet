@@ -25,7 +25,11 @@ screen (image versions v8-v14 in NOTES.md):
                   mini-buddy flags off
   activation      mobileactivationd data ark seeded; the actual Activated state
                   comes from its Hactivation branch, selected by the /chosen
-                  security-status properties in tools/mkadt.py
+                  security-status properties in tools/mkadt.py. The container is
+                  seeded at BOTH the legacy UUID and the runtime UUID
+                  containermanagerd resolves (7D5F4CDD-...), because the daemon
+                  traps at brk #0x1 if setResourceValue:NSURLIsExcludedFromBackupKey
+                  fails on the missing runtime container path.
 """
 import glob, os, plistlib, shutil, sys
 

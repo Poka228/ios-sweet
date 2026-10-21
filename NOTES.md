@@ -94,14 +94,36 @@ sitting in the activation XPC the whole time). The display-off is a *symptom*.
 - Secondary, still worth doing: provide an `os_crash_function` symbol so future asserts print
   a readable message instead of a bare `brk`.
 
+**FIX APPLIED (2026-10-21) — awaiting the user's OK to flash `userdata`.**
+1. `tools/sweet-root-tweaks.py` now seeds the container at **both** UUIDs:
+   `MOBILEACTIVATIOND_RUNTIME_UUID = 7D5F4CDD-1529-4133-9E26-8E449AFC95B3` (the one
+   containermanagerd resolves at runtime) **and** the legacy `D90C94C4-…`, each with a
+   `Library/internal/data_ark.plist`; `activation()` is idempotent (commit `105f058`).
+2. The **same change was applied directly to the existing image** (no 12-min rebuild): the
+   image was remounted rw (`sudo fsck.hfsplus -fy out/ios16-root.img` then
+   `sudo mount -t hfsplus -o loop,force`; note the volume is never cleanly unmounted, so
+   fsck is required before a rw mount) and
+   `/private/var/containers/Data/System/7D5F4CDD-1529-4133-9E26-8E449AFC95B3/` was created
+   (root:wheel 0755, `.com.apple.mobile_container_manager.metadata.plist` 0644, ark
+   501:501 0600). fsck after the change: "appears to be OK".
+   - **`out/ios16-root.img` raw SHA256 `cd49b69ff215f0e2b87ee3d347e5c14db008b6071e894fbf5e70ce2f83f5708d`**
+     (before the change: `d8cd7dd9…`).
+   - Sparse rebuilt: `out/ios16-root.simg` (flash artifact).
+3. **Reflash `userdata` (DESTRUCTIVE — needs the user's explicit OK):**
+   `fastboot flash -S 512M userdata out/ios16-root.simg` (7 min, 25 chunks; abort if the user
+   says no). ABL usually hangs after a big flash: the user re-enters fastboot by hand
+   (Power+VolDown). Then `fastboot boot shim/out/shim-boot-davinci-c1-t200.img`.
+
+**Expect:** mobileactivationd finds its container, skips the failing
+`setResourceValue:NSURLIsExcludedFromBackupKey`, no longer traps -> `MadGate
+getActivationState` returns -> `SBLockdownManager _setupActivationState` completes ->
+SpringBoard leaves the `mach_msg_trap`/MadGate stack -> shell check-in -> home screen. Watch
+`CRASH mobileactivation` drop to ~0 and the sampler stack change.
+
 **NEXT (in order):**
-1. **Edit `tools/sweet-root-tweaks.py`: `MOBILEACTIVATIOND_UUID = '7D5F4CDD-1529-4133-9E26-8E449AFC95B3'`**
-   (verify the same repair is needed for any other seeded containers whose runtime UUID
-   differs), rebuild the 16 GiB root image, reflash `userdata` (DESTRUCTIVE - ask the user
-   first), and boot `shim/out/shim-boot-davinci-c1-t200.img`.
-2. Expect: mobileactivationd survives -> SpringBoard's `_setupActivationState` returns ->
-   shell check-in completes -> home screen. Watch `SWEET AKS`/`CRASH mobileactivation` counts
-   drop to ~0 and SpringBoard t0 leave the `MadGate` stack.
+1. **Get the user's OK, then flash `out/ios16-root.simg` to `userdata`** and boot
+   `shim/out/shim-boot-davinci-c1-t200.img`.
+2. Confirm mobileactivationd stops crashing and SpringBoard's t0 leaves the MadGate XPC.
 3. Add an `os_crash_function` stub to get readable asserts (optional, after step 1).
 4. Keep the `sweettouch=0` variant in reserve to close out touch entirely if needed.
 5. Any further destructive flash only with explicit user confirmation.
