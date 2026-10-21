@@ -109,11 +109,10 @@
      "     'IOClass'         = IOPanicPlatform;"
 --- /dev/null
 +++ b/bsd/dev/sweet_rpmh.c
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,364 @@
 +/*
-+ * SWEET PM6150L LDO rail bring-up; see report.md for DT and source evidence.
-+ * The rail name and voltage are the caller's (sweet L11C/ldoc11, davinci
-+ * L6C/ldoc6, both from the ADT sweet-touch node).
++ * SWEET PM6150L LDO rail bring-up (sweet L11C/ldoc11, davinci L6C/ldoc6);
++ * the rail name and voltage are the caller's, from the ADT sweet-touch node.
 + * Sole XNU apps-DRV owner, called from thread context with deep idle disabled.
 + * No sleep/wake programming, SPMI writes, GIC handler, or timeout recovery.
 + */
