@@ -1,6 +1,72 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, t200 boot: backboardd renders, SpringBoard stuck)
+## Agent handoff / active work (2026-10-21 late: container-UUID fix WORKED; new blocker = lsd)
+
+**STATE: the `mobileactivationd` container-UUID fix is CONFIRMED — the daemon no longer
+crashes and the activation gate is GONE. SpringBoard moved from the activation block to a
+much later, normal stage (LaunchServices app-database query), and the boot got dramatically
+further: 204 unique daemons (vs ~dozens before), the display stayed ON (rendered swaps
+2/3/4/6/7, no early `display off`), and `CRASH mobileactivation` = 0. The machine still ends
+with a reset after the Apple logo, but at a NEW and later blocker.**
+
+Log: `logs/boot.txt`, 1965 lines, SHA256
+`0b8d4314835cbf5ef3214a98a3faf9cce763434fdce4d38188f5160462f2975a`; raw ring `total 141927
+seq 19`, complete. Image `shim/out/shim-boot-davinci-c1-t200.img` (`97bf2efb…`) on the
+**fixed** root image `out/ios16-root.simg` (`0fd41205…`, container seeded at both UUIDs).
+User report: Apple logo, then restart.
+
+**What changed (proof the fix worked):**
+- `CRASH mobileactivation` = **0** (was several per boot). `SMP mobileactivation[111]` appears
+  in the sampler **alive and running**. The daemon found its container at
+  `7D5F4CDD-…`, skipped the failing `setResourceValue:NSURLIsExcludedFromBackupKey`, no trap.
+- **SpringBoard's t0 stack completely changed** (slide `0x543b4000`):
+  ```
+  -[LSApplicationRecord _initWithNode:bundleIdentifier:...]
+    LaunchServices::Database::Context::_get
+      _LSContextInitWithOptions -> _LSContextInitCommon -> __LSCopyServerStore
+        LAUNCH_SERVICES_WAS_ASKED_TO_PERFORM_BLOCKING_IO_ON_THE_MAIN_QUEUE  <-- sync XPC
+          xpc_connection_send_message_with_reply_sync -> mach_msg_trap
+  ```
+  i.e. SpringBoard is past `-[SBLockdownManager _setupActivationState]`/`MadGate
+  getActivationState` entirely and is now loading the app database. mobileactivationd's own
+  t0 is in the **same** `__LSCopyServerStore` wait — a normal, later iOS startup step.
+- The boot continued far past the 90 s sample: `accounts`, `securityd`, `siriknowledged`,
+  `cryptexd`, `searchd`, `softwareupdateservicesd`, `fileproviderd`, `pkd`, `spindump`,
+  `nebulad`… **204 unique daemons** (466 execs).
+
+**NEW blocker (the thing to chase next): `lsd` (LaunchServices daemon) does not answer
+`__LSCopyServerStore`.** `lsd` is exec'd at line 824, calls `AKS sel 0/7` (lines 1030-1031)
+and **is never seen again** — it neither answers SpringBoard's synchronous store query nor
+reports anything. So SpringBoard (and mobileactivationd) block forever in
+`LAUNCH_SERVICES_WAS_ASKED_TO_PERFORM_BLOCKING_IO_ON_THE_MAIN_QUEUE`.
+- This is the same *class* of failure as before (a userspace XPC dependency never replies)
+  but one layer later. It is NOT the activation gate.
+- `lsd` was not in `sweetsample`, so its stack was not captured. Next boot must sample `lsd`
+  (and `containermanagerd`) to see where it is stuck.
+
+**Also still true / benign:** `datamigrator` exec'd 4× (relaunch loop), `securityd sel 10 ->
+0xe00002c7` (AKS), `fairplayd.H2`/`bluetoothd` relaunch loop, `SWEET Sandbox: … privilege
+denied` for symptomsd/aggregated — all known-benign (they also occur on sweet).
+
+**NEXT (in order):**
+1. **Boot the same fixed image with `sweetsample=lsd,SpringBoard,backboardd,mobileactivation,containermanagerd`**
+   (touch delay 200 s) to capture lsd's stack and see whether lsd is stuck, crashed, or just
+   slow building the database. Build a new variant with `tools/mkboot-variant.sh`.
+2. If `lsd` is stuck in a `_LSCopyServerStore`-side call (e.g. waiting on
+   `containermanagerd`, `mobilegestalt`, or an mmap/FS op), fix that dependency.
+3. If `lsd` is slow (first-boot DB build), check whether it is actually scanning the root
+   image's bundles and whether it ever completes.
+4. Keep touch (`sweettouchdelay=200`) out of the critical window; `sweettouch=0` still in
+   reserve.
+5. Any further destructive flash only with explicit user confirmation (the current image is
+   already flashed and contains the fix).
+
+**Symbolication recipe:** `/tmp/opencode/ipsw` (prebuilt 3.1.739; re-download after a server
+restart, ~108 MB) with the image's `dyld_shared_cache_arm64*` copied to `/tmp/opencode/dsc`;
+`ipsw dyld a2s /tmp/opencode/dsc/dyld_shared_cache_arm64 <hex(addr - slide)>`. This boot's
+slide was `0x543b4000`. `build/hfsplus.ko` must be re-`insmod`ed after a server restart.
+
+## Agent handoff (2026-10-21, t200 boot: backboardd renders, SpringBoard stuck)
 
 **STATE: the `cpus=1 sweettouchdelay=200` boot SURVIVED past 90 s (the sampler fired) and
 shows backboardd actually RENDERING (3-4 composite swaps) before the display is turned off.
