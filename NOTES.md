@@ -86,11 +86,15 @@ coincidence of timing. mobileactivationd crashed 3x here too (same `brk` site).
 `d02883e3fbf39dddb2747bbf291fd3700963e0e467bb90da52acb183117fb7a2`.
 
 **NEXT (in order):**
-1. **Decisive `cpus=1` sampler boot.** Same kernel, `cpus=1` +
+1. **Decisive `cpus=1` sampler boot — image already built.** Boot
+   `shim/out/shim-boot-davinci-c1.img` (SHA256
+   `e55d43ace27d0a0ed18f0940331fcbd94a710352be6f4a49f46261eec5b3ff25`) with `fastboot boot`.
+   Same kernel (`928dae4f…`) and ADT, only cmdline differs: `cpus=1` +
    `sweetsample=SpringBoard,backboardd,datamigrator,mobileactivation` +
-   `sweetscan=mobileactivation`. This must be the next boot: with `cpus=1` the machine
-   survived ~11.5 min before, so the sampler (90 s) will fire and we finally see the frozen
-   SpringBoard/backboardd stacks (is SpringBoard in `_checkIn`? is `datamigrator` stuck?).
+   `sweetscan=mobileactivation,SpringBoard,backboardd` + `sweettouchdelay=30`. With `cpus=1`
+   the machine survived ~11.5 min before, so the sampler (90 s) will fire and we finally see
+   the frozen SpringBoard/backboardd stacks (is SpringBoard in `_checkIn`? is `datamigrator`
+   stuck?).
 2. **Then the `cpus=6` regression test:** `cpus=2` (one secondary A55). If life drops from
    ~11 min (`cpus=1`) to <90 s (`cpus=6`), find why the secondary cores wedge the board.
 3. Add a **PMIC PON reset-reason read** (SPMI PON 0x8xx reason1/reason2 at start) so the
