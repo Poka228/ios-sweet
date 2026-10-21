@@ -174,6 +174,7 @@ the top of this file. The os_feature fix removes lsd t5 from the cycle.
 1. `img2simg out/ios16-root.img out/ios16-root.simg` — DONE (12,145,324,344 B, same size as
    before, header `total_blks 4194304 × 4096 = 16 GiB`, `total_chunks 27812`). Raw image
    re-mounted read-only and both plists re-read from disk: `HRN -> Enabled: true` present.
+   Sparse SHA256 `0fd412059fec7bf60112a4be95940a7a52b4aa21a2fb5dfb514dc9c5fbe7afab`.
 2. Ask the user for explicit confirmation, then
    `fastboot flash -S 512M userdata out/ios16-root.simg` and
    `fastboot boot shim/out/shim-boot-davinci-c1-lsd2.img` (same cmdline as `c1-lsd`; SHA
