@@ -90,11 +90,38 @@ def find_container(root, kind, identifier):
     return None
 
 
+# UUID of the com.apple.mobileactivationd system container. On iOS this lives
+# on the data volume and is created by containermanagerd; our image is a single
+# volume with no /private/var/containers at all (mkiosroot.sh only copies the
+# OS root), so the container and its metadata are seeded here with the same
+# UUID the working sweet image v14 used, so find_container() locates it.
+MOBILEACTIVATIOND_UUID = 'D90C94C4-F94E-4FCF-8A28-A93BE3846D8E'
+
+
+def make_system_container(root, uuid, identifier):
+    """Create a Data/System container with the metadata containermanagerd reads."""
+    c = os.path.join(root, 'private/var/containers/Data/System', uuid)
+    os.makedirs(c, exist_ok=True)
+    os.chown(c, 0, 0)
+    os.chmod(c, 0o755)
+    save(os.path.join(c, '.com.apple.mobile_container_manager.metadata.plist'), {
+        'MCMMetadataIdentifier': identifier,
+        'MCMMetadataUUID': uuid,
+        'MCMMetadataContentClass': 1,
+        'MCMMetadataMinOSVersion': '16.0',
+        'MCMMetadataInfoMinOSVersion': '16.0',
+        'MCMMetadataDataSeparatedShareUUID': uuid,
+        'MCMMetadataUserIdentity': '0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0',
+        'MCMMetadataIsDataSeparated': False,
+    }, 0, 0, 0o644)
+    print('system container', identifier, uuid)
+    return c
+
+
 def activation(root):
     c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
     if c is None:
-        print('warning: no mobileactivationd system container in the image; skipped data ark')
-        return
+        c = make_system_container(root, MOBILEACTIVATIOND_UUID, 'com.apple.mobileactivationd')
     d = os.path.join(c, 'Library/internal')
     os.makedirs(d, exist_ok=True)
     os.chown(d, MOBILE, MOBILE)
