@@ -1,9 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, davinci first boot log read)
+## Agent handoff / active work (2026-10-21, davinci-touch6 image built)
 
-**STATE: the Mi 9T boots to the Apple logo and hangs there; the log is now read and the
-stall is understood.** The full console (`logs/boot.txt`, 1940 lines / 147 KB; raw ring at
+**STATE: the touch fix is now built into a kernel and packed into a boot image ready to
+boot.** The Mi 9T still last booted `cpus=1` and hung on the Apple logo (userspace deadlock,
+analysis below). The current un-booted image is `shim/out/shim-boot-davinci-touch6.img`
+(SHA256 `1bfc7ec1…`, kernel `928dae4f…`) = touch-RPMh fix + **`cpus=6`** + wider sampler.
+
+The full console (`logs/boot.txt`, 1940 lines / 147 KB; raw ring at
 `tools/logs/boot.txt.bin`, ring header `total 147554 < 4 MiB`, flush #69, so this is the
 **entire** console from boot to end) shows a healthy kernel and userspace bring-up, then a
 clean userspace **deadlock**:
@@ -46,23 +50,38 @@ mv > 3400)`), so davinci's ADT-driven `ldoc6`/3100 mV was rejected with EINVAL(2
 `SWEET RPMH: expected ldoc11 and 2950..3400 mV` then `SWEET TOUCH: ldoc6 RPMh enable failed
 22; probes skipped` (log lines 1618-1619) -> no touch. `rh_lookup()` is already
 resource-agnostic, so only the guard was relaxed to accept any `ldocN` in 1700..3600 mV.
-**Not yet built into a kernel.**
+Guard is now `if (!res || strncmp(res, "ldoc", 4) || !res[4] || mv < 1700 || mv > 3600)`
+(patch 0062 line 449). Built and verified working in the kernel below.
 
-- Kernel: fork Actions run `39452552429` (success), artifact `xnu-kernel`, `kernel.development.sweet` SHA256 `b47aee2bc9790c29e39254a31be671c12519c213b6fe66e304832005427eee4e`.
+**Patch-0062 hunk-count bug (fixed, commit `19cd881`):** the touch-fix edits added lines to
+the `@@ -0,0 +1,N @@` new-file hunks without bumping `N`, so CI's `patch` truncated the
+files (`sweet_rpmh.c:6 unterminated conditional directive` / `:358 expected '}'`) and run
+`39526436815` failed with exit 2. All new-file hunk counts were recounted against their
+bodies (`sweet_rpmh.c` is now `+1,364`); a stub-tree apply proves a clean apply, 364 lines,
+balanced braces and a closed `#if`/`#endif`.
+
+- Kernel **(current, with touch fix)**: fork Actions run `39527229953` (success),
+  `kernel.development.sweet` SHA256 `928dae4fc782724c1e1b5fefcbeb58a25ea9d7d5c93b9081ee13d658e45c020b`
+  (matches CI `SHA256SUMS`), installed into `xnu/out/`.
+- Boot image **(current, not yet booted)**: `shim/out/shim-boot-davinci-touch6.img`,
+  17,203,200 B, SHA256 `1bfc7ec1ef94666ee970a1b607bdef15f71d007a7adf9676d4d17b0cf1493a22`, built via
+  `tools/mkboot-variant.sh davinci-touch6`. Cmdline = previous boot cmdline with **`cpus=6`**
+  (was `cpus=1`) + `sweetsample=SpringBoard,backboardd,datamigrator,mobileactivationd`.
+  Canonical `shim-boot-davinci.img` is preserved byte-identical (`e9286a67…`).
+- Previous kernel: run `39452552429` (success), `kernel.development.sweet` SHA256 `b47aee2bc9790c29e39254a31be671c12519c213b6fe66e304832005427eee4e`.
 - Root image (16 GiB journaled case-sensitive HFS+, iOS 16.7.16 / 20H392) built and **flashed by the user** to `userdata`: `out/ios16-root.simg`, 12,145,324,344 B, SHA256 `c5940f22f728b0a1a2d4bab1455ff9a426bead4ca1307b10176fd64d61c33c2f` (raw `out/ios16-root.img` 17,179,869,184 B, SHA256 `d8cd7dd930d370a228b54178649da52841d3eec0d91d051eb401b9be0df1bdca`; fsck clean). Contains the OS root + SystemOS/AppOS cryptexes, keybag, dyld cache and all bring-up tweaks incl. the seeded `com.apple.mobileactivationd` system container + data ark.
 - Phone image (`shim/out/shim-boot-davinci.img`, 17,203,200 B, SHA256 `e9286a67c73488c4dc1971e9be7e059d4ba0b138cfa6b6666667b6fdb9f627c2`): rebuilt with the ADT that now carries the real iPhone X `/product` node (D22AP, needed by MobileGestalt); ramdisk==payload and dtb==stock base verified. Booted with `fastboot boot`, nothing else was flashed.
 
 **NEXT (in order):**
-1. Build a kernel with the touch-RPMh fix via CI, then a boot image whose cmdline samples
-   more processes: `sweetsample=SpringBoard,backboardd,datamigrator,mobileactivationd`
-   (patch 0054 parses a custom comma list from `sweetsample=`). This will show whether
-   `datamigrator` is itself stuck and whether SpringBoard is in `_checkIn`.
-2. Consider a `cpus=6` variant to match sweet's home-screen boot if the sampler shows the
-   stall is migration throughput rather than a hard deadlock.
-3. Rebuild the boot image after any change: `python3 tools/mkpayload.py <KERNEL> shim/out/davinci.adt
-   shim/out/payload.bin --cmdline "<CMDLINE>"` then `DEVICE=davinci PYTHONPATH=/mnt/e/ios-sweet/build/mkbootimg-stub
-   shim/build.sh out/payload.bin` (note: `shim/build.sh` does `cd shim` and always writes
-   `shim-boot-davinci.img`; copy/rename variants and restore the canonical name afterwards).
+1. **Boot `shim/out/shim-boot-davinci-touch6.img` with `fastboot boot` (no flash)** and pull
+   the log. Check (a) does touch now probe (`SWEET TOUCH:` without `RPMh enable failed 22`),
+   (b) is `datamigrator` itself stuck, (c) is SpringBoard in `_checkIn` (`BKSSystemShellService`),
+   (d) does `cpus=6` change the backboardd swap count (>4) or the identical-stack signature.
+2. Investigate the missing ProgressUI / migration screen and the `SWEET AKS: securityd sel 10
+   ... -> 0xe00002c7` keybag error (x12).
+3. Rebuild the boot image after any change with `tools/mkboot-variant.sh <variant> <KERNEL>
+   shim/out/davinci.adt "<CMDLINE>"` (it saves/restores the canonical image and does the
+   `cd shim` / absolute-payload dance for you).
 4. Any further destructive flash only with explicit user confirmation.
 
 Tooling added for this boot: `tools/sweet-log-pull.py` + `tools/sweet-log-pull.cmd` and
