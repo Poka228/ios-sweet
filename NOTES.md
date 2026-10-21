@@ -108,7 +108,8 @@ sitting in the activation XPC the whole time). The display-off is a *symptom*.
    501:501 0600). fsck after the change: "appears to be OK".
    - **`out/ios16-root.img` raw SHA256 `cd49b69ff215f0e2b87ee3d347e5c14db008b6071e894fbf5e70ce2f83f5708d`**
      (before the change: `d8cd7dd9…`).
-   - Sparse rebuilt: `out/ios16-root.simg` (flash artifact). NOTE: `img2simg` on this
+   - Sparse rebuilt: `out/ios16-root.simg`, **12,145,324,344 B** (same size as the
+     previously flashed image), ready to flash. NOTE: `img2simg` on this
      16 GiB image over `/mnt/e` takes **>15 min** (it reads all 17 GiB before writing
      anything, so the output stays 0 bytes for ~12 min, then grows). Run it **detached**
      (`sudo setsid nohup img2simg …`) or the tool-shell timeout kills the child.
