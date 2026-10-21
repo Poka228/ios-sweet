@@ -439,9 +439,14 @@
 +int
 +sweet_rpmh_vreg_enable(const char *res, unsigned mv)
 +{
-+	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
-+	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
-+		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	/*
++	 * Board-specific helper: do not apply PMIC5-LDO policy to arbitrary
++	 * resources. The rail name and voltage come from the ADT sweet-touch
++	 * node (sweet: ldoc11 3200 mV, davinci: ldoc6 3100 mV), so accept any
++	 * "ldocN" name in the PMIC5 LDO range instead of a hardcoded rail.
++	 */
++	if (!res || strncmp(res, "ldoc", 4) || !res[4] || mv < 1700 || mv > 3600) {
++		printf("SWEET RPMH: refusing vreg %s %u mV\n", res ? res : "(null)", mv);
 +		return EINVAL;
 +	}
 +	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {

@@ -2,6 +2,9 @@
 backup/
 dtb/
 recovery/
+# console logs from the phone (may carry the serial and device state)
+logs/
+tools/logs/
 # third-party/Apple sources fetched for reading
 research/
 shim/out/
