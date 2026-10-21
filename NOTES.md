@@ -35,15 +35,17 @@ SHA256 `fc230376b76a2255bf8000cab155c13d74bf6a4dfd3d7cf78018439e5de09fd7`; raw
    to confirm** (see NEXT).
 
 **NEXT (in order):**
-1. **Decisive test: boot the same `actdiag` image again with `sweettouch=0` added.** If it
-   still goes silent at the same stage, touch is innocent (machine dies on its own ~30-90 s
-   in). If it gets further / behaves like `touch6`, touch's MMIO is wedging the SoC.
-   Also fix the scan arg: `sweetscan=mobileactivation` (16-char comm, no `d`).
-2. **Get the mobileactivationd assert text**: rebuild with
-   `sweetscan=mobileactivation,SpringBoard,backboardd` so the next crash prints `STR ...`
-   lines (patch 0051/0053 print the dying process's heap strings).
-3. Consider `sweetusb=2` (live USB console over UDP, `shim/out/shim-boot-davinci-usb.img`
-   pattern) to capture the exact last words and whether the machine hangs vs resets.
+1. **Boot `shim/out/shim-boot-davinci-scan.img`** (SHA256
+   `d02883e3fbf39dddb2747bbf291fd3700963e0e467bb90da52acb183117fb7a2`, same kernel) via
+   `fastboot boot`. It uses `sweetscan=mobileactivation,SpringBoard,backboardd` (**correct
+   16-char comm**) and keeps `sweettouchdelay=30`. Expect `STR ...` lines with the
+   mobileactivationd assert text, and — if the machine survives — the touch `gcc vote=` /
+   `TLMM reset=` / `RPMh` lines confirming the `ldoc6` fix.
+2. **Then the decisive touch-innocence test:** same image with `sweettouch=0` added. If it
+   still goes silent around the same stage, touch is innocent; if it gets further, touch's
+   MMIO is wedging the SoC.
+3. Consider `sweetusb=2` (live USB console over UDP) to capture the exact last words and
+   whether the machine hangs vs resets.
 4. Symbolication: only shared-cache frames need `ipsw` (not buildable here); in-binary frames
    are resolved with `llvm-objdump` on `/tmp/opencode/rootchk/usr/libexec/mobileactivationd`.
 
