@@ -17,6 +17,10 @@ screen (image versions v8-v14 in NOTES.md):
   migration       LastSystemVersion so DataMigration does not run for an hour
                   on every boot
   audio           VirtualAudio HAL plug-in disabled (mediaserverd crash)
+  os_features     DeviceManagementClient.HRN os_feature flag enabled so lsd's
+                  +[LSHRNSupport deviceConfiguredForHRN] short-circuits instead
+                  of doing a synchronous activation-record XPC to
+                  mobileactivationd (that XPC is the lsd three-way deadlock)
   MediaToolbox    StartRecorderServer=false (camera filter prewarm calls a
                   NULL OpenGL function without a GPU -> mediaserverd crash loop)
   SpringBoard     BKNoWatchdogs (one slow CPU path, no scene-create watchdog
@@ -160,6 +164,40 @@ def activation(root):
         print('data ark', d)
 
 
+def os_features(root):
+    """Enable the DeviceManagementClient.HRN os_feature flag.
+
+    LaunchServices' +[LSHRNSupport deviceConfiguredForHRN] asks
+    os_feature_enabled_impl("DeviceManagementClient", "HRN"). When that is
+    FALSE it falls through to MAECopyActivationRecordWithError, a synchronous
+    XPC to mobileactivationd. On this boot lsd services an
+    identifierForVendor/__LSCopyServerStore XPC FROM a process whose
+    LaunchServices query can only complete once lsd answers it, so lsd waits on
+    mobileactivationd, which waits on lsd: a three-way deadlock (lsd t0 -> lsd
+    t5 -> mobileactivationd -> lsd t0, NOTES.md 2026-10-21). With HRN enabled
+    deviceConfiguredForHRN returns true at 0x181c2597c and lsd computes the
+    vendor identifier locally, with no XPC. HRN is absent from the stock domain
+    plist, so os_feature_enabled defaults it to false.
+    """
+    path = os.path.join(root, 'System/Library/FeatureFlags/Domain',
+                        'DeviceManagementClient.plist')
+    st = os.stat(path)
+    data = load(path)
+    data.setdefault('HRN', {}).update(
+        {'Enabled': True, 'DevelopmentPhase': 'FeatureComplete'})
+    save(path, data, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
+    print('os_feature DeviceManagementClient.HRN enabled')
+    # Belt and braces: the same flag in the Global layer, which
+    # init_featureflags also folds into com.apple.featureflags.shm.
+    gpath = os.path.join(root, 'System/Library/FeatureFlags/Global.plist')
+    st = os.stat(gpath)
+    g = load(gpath)
+    g.setdefault('DeviceManagementClient', {}).setdefault('HRN', {}).update(
+        {'Enabled': True, 'DevelopmentPhase': 'FeatureComplete'})
+    save(gpath, g, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
+    print('os_feature Global DeviceManagementClient.HRN enabled')
+
+
 def audio(root):
     src = os.path.join(root, 'Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin')
     dst_dir = os.path.join(root, 'Library/Audio/Plug-Ins/HAL.disabled')
@@ -182,6 +220,7 @@ def main():
     launchd(root)
     containers(root)
     activation(root)
+    os_features(root)
     audio(root)
     merge_pref(root, 'com.apple.migration', {
         'LastSystemVersion': BUILD,

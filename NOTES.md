@@ -1,6 +1,112 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21 late: container-UUID fix WORKED; new blocker = lsd)
+## Agent handoff / active work (2026-10-21 late: lsd deadlock ROOT-CAUSED; fix written, not yet booted)
+
+**STATE: the three-way lsd deadlock is fully root-caused and the fix is a one-line
+os_feature flag. `+[LSHRNSupport deviceConfiguredForHRN]` calls
+`os_feature_enabled("DeviceManagementClient", "HRN")`; when that is FALSE it issues the
+blocking activation-record XPC to mobileactivationd (the deadlock). `HRN` is absent from
+the stock `DeviceManagementClient.plist`, so it defaults to false. `tools/sweet-root-tweaks.py`
+now adds `HRN -> Enabled:true` to both the domain plist and Global.plist. Image tweaked,
+fsck clean. NOT yet img2simg'd / flashed.**
+
+Correction to the earlier note below: **pre-seeding the lsd identifier cache does NOT avoid
+the HRN call — it is the opposite.** In `getIdentifierOfType:...]_block_invoke` at
+`0x181c1d32c`, if `identifiersOfTypeNotDispatched:` (LSVendors) is **nil** the code jumps to
+`0x181c1d5e8` and returns **without** calling `deviceConfiguredForHRN`; if it is **non-nil**
+it calls `deviceConfiguredForHRN` at `0x181c1d33c`. `allIdentifiersNotDispatched` creates an
+empty-but-present `LSVendors` once `deviceUnlockedSinceBoot` is true, so the cache-seeding
+idea cannot break the cycle. The os_feature flag is the real lever.
+
+### The fix lever (disassembly-confirmed, CoreServices / lsd)
+`+[LSHRNSupport deviceConfiguredForHRN]` (`0x181c258b0`):
+- `0x181c25934`: `x8 = [0x1dcdd22a8]` (cached answer); `cbz` -> query. Query path:
+- `0x181c2594c`: `x0 = "DeviceManagementClient"`, `0x181c25954`: `x1 = "HRN"`,
+  `0x181c2595c: bl <stub>` = **`__os_feature_enabled_impl(domain, feature)`**
+  (the only 2-CFString / bool-returning import in CoreServices; `MGGetBoolAnswer` is 1-arg
+  and `MGCopyAnswer`'s x1 is `&error`, and neither `"DeviceManagementClient"` nor `"HRN"`
+  exists as a MobileGestalt key).
+- `0x181c2597c: cbnz w0, 0x181c25aec` — if the flag is TRUE, jump straight to the end:
+  **no `MAECopyActivationRecordWithError`, no XPC.** Returns `[x22,#0x29d] != 0` (true).
+- Caller `0x181c1d340: cbz w0, 0x181c1d3a4` — with true it takes `0x181c1d344`
+  (`deviceIdentifierVendorSeed` + `vendorIDFromVendorName`), all local, still no XPC.
+- If the soft-linked `MAECopyActivationRecordWithError` pointer (`[0x1dcdd0d90]`) is NULL
+  (`0x181c25a30: cbz x8`), the XPC is also skipped — but that requires breaking
+  MobileActivation.framework, not needed.
+
+os_feature flags in iOS 16: `/System/Library/FeatureFlags/Domain/<Domain>.plist`
+(`<Feature> -> {Enabled: true}`; `FeatureFlagsExample.plist` confirms the format) plus
+`/System/Library/FeatureFlags/Global.plist`, folded into `com.apple.featureflags.shm` by
+`/usr/libexec/init_featureflags` (`shm_open` + `ftruncate` + `memcpy`, rewritten every run).
+`DeviceManagementClient.plist` ships with only `ESSO`/`ESSOTest` — no `HRN`. There is no
+stale shm in the image, so the new flag is picked up on the next boot.
+
+### The deadlock (from the lsd-sampling boot, slide `0x6b24000`)
+Log SHA256 `d70c5cec296810920c32371a6b56ae79768a5a18118d50f67dfedb01b439ae7b`, 1671 lines,
+ring complete, 1 sample. After the sample the log loops `fairplayd.H2`/`bluetoothd` until
+reset — the deadlock is terminal, not slow.
+
+- `lsd` **t0** (main): `__LSServerMain` -> `dispatch_once_callout` ->
+  `+[_LSInstallProgressService beginListening]_block_invoke` ->
+  `-[_LSInstallProgressService performJournalRecovery]` -> `dispatch_sync` on the
+  `com.apple.lsd.observers` queue -> `_dispatch_sync_f_slow` ->
+  `__DISPATCH_WAIT_FOR_QUEUE__` -> `dispatch_event_loop_wait_for_ownership`
+  (**waiting for the observers queue held by lsd t5**).
+- `lsd` **t5** (observers queue): `-[_LSDeviceIdentifierCache getIdentifierOfType:...]` ->
+  `+[LSHRNSupport deviceConfiguredForHRN]` -> `initMAECopyActivationRecordWithError` ->
+  `MAECopyActivationRecordWithError` -> `-[MadGate copyActivationRecord:]` ->
+  `xpc_connection_send_message_with_reply_sync` (**waiting on `mobileactivationd`**).
+- `mobileactivationd` t0, `SpringBoard` t0, `backboardd` t12: all in
+  `_LSDNCGetBundleClass` -> `LaunchServices::Database::Context::_get` ->
+  `_LSContextInitWithOptions` -> `_LSContextInitCommon` -> `__LSCopyServerStore` ->
+  `___LAUNCH_SERVICES_WAS_ASKED_TO_PERFORM_BLOCKING_IO_ON_THE_MAIN_QUEUE__`
+  -> sync XPC (**waiting on `lsd`**).
+- Cycle: `lsd(t0) -> lsd(t5) -> mobileactivationd -> lsd(server) -> lsd(t0)`.
+
+### Deadlock internals (fully reversed from the dyld cache)
+`-[_LSInstallProgressService init]` stores the queue `com.apple.lsd.observers` at ivar
+`#0x48` (built with `dispatch_queue_create`-class call at `0x181d26d98`).
+`performJournalRecovery` (`0x181d10e50`) does `dispatch_sync([self,#0x48], block)` at
+`0x181d10ea4` (`bl 0x181d26e64` = the dispatch_sync stub); the sync block runs
+`loadJournalledNotificationsFromDisk` then `dispatchJournalledNotificationsToConnectedClients`.
+`lsd` t5 holds the observers queue inside the HRN XPC, so t0's `dispatch_sync` waits (and
+thus cannot answer `__LSCopyServerStore`). Clear the HRN XPC and the whole cycle unwinds.
+
+### (Superseded, kept for the record) the lsd identifier cache
+- `-[_LSDefaults identifiersFileURL]` (`0x181c159b0`) ->
+  `/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.lsd/Library/Caches/com.apple.lsdidentifiers.plist`;
+  `systemGroupContainerURL` comes from `container_system_group_path_for_identifier`.
+- Plist keys: top-level dict keyed by `LSVendors` (type 0); each vendor dict has
+  `LSVendorIdentifier`/`LSVendorSeed`/`LSAdvertiserIdentifier`. `.../containers/Shared/SystemGroup/`
+  is EMPTY on the image.
+- **But seeding it does NOT help** (see the correction at the top): a non-nil `LSVendors` is
+  exactly what makes `deviceConfiguredForHRN` get called.
+
+### Also resolved this session
+- `installJournalDirectoryURL` = `<databaseContainerURL>/com.apple.LaunchServices.InstallJournal`
+  (`databaseContainerURL` = `userContainerURL` unless education/lightweight). Sibling files:
+  `com.apple.LaunchServices.dirty|.error|.syncInterrupted`, `ProgressProporitions.plist`.
+  `_LSInstallNotificationJournaller` (not `_LSInstallProgressService`) owns the journal dir.
+- Migration is already skipped: `/private/var/mobile/Library/Preferences/com.apple.migration.plist`
+  has `LastSystemVersion = 20H392`, so the migration gate is NOT this boot's cause.
+
+**NEXT (in order):**
+1. **Pre-seed the identifier cache** via `tools/sweet-root-tweaks.py`: create
+   `private/var/containers/Shared/SystemGroup/systemgroup.com.apple.lsd/Library/Caches/` and
+   write a valid `com.apple.lsdidentifiers.plist` with an `LSVendors` entry (type 0) so
+   `identifiersOfTypeNotDispatched:` is non-nil and `deviceConfiguredForHRN` is skipped.
+   Then remount rw / `sudo fsck.hfsplus -fy` / `img2simg` detached. **Flash only with
+   explicit user confirmation.**
+2. If pre-seeding alone doesn't work, also pre-create the LS install-journal dir
+   (`<userContainerURL>/com.apple.LaunchServices.InstallJournal`, empty) so
+   `performJournalRecovery` is trivial.
+3. Verify by booting with `sweetsample=lsd,SpringBoard,backboardd,mobileactivation,containermanagerd`;
+   watch for `lsd` answering `__LSCopyServerStore` and SpringBoard/backboardd unblocking.
+4. Fallbacks kept in reserve: `cpus=1` with touch out of the window (`sweettouchdelay=200`)
+   and `sweettouch=0`; consider whether more cores win the race (sweet reached the home
+   screen with `cpus=6`).
+
+## Previous handoff (2026-10-21 late: container-UUID fix WORKED; new blocker = lsd)
 
 **STATE: the `mobileactivationd` container-UUID fix is CONFIRMED — the daemon no longer
 crashes and the activation gate is GONE. SpringBoard moved from the activation block to a
