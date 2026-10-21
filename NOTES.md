@@ -1,21 +1,75 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, davinci first boot)
+## Agent handoff / active work (2026-10-21, davinci first boot log read)
 
-**STATE: the Mi 9T boots to the Apple logo and hangs there.** Confirms the shim, the base DTB (+ABL's dtbo merge), early XNU, the framebuffer and the HFS+ root mount all work; the stall is in userspace. No panic. Log not read yet.
+**STATE: the Mi 9T boots to the Apple logo and hangs there; the log is now read and the
+stall is understood.** The full console (`logs/boot.txt`, 1940 lines / 147 KB; raw ring at
+`tools/logs/boot.txt.bin`, ring header `total 147554 < 4 MiB`, flush #69, so this is the
+**entire** console from boot to end) shows a healthy kernel and userspace bring-up, then a
+clean userspace **deadlock**:
+
+- Kernel/drivers: `SWEET UFS: "userdata" on LUN 0 ... 52805 MiB, read-write`; USB, HID
+  keys, AMFI, Sandbox, AKS, HFS all up. `SWEET FB: AppleCLCD 1080x2340 ... presented as
+  1125x2436`, `display on`.
+- backboardd composites exactly **4 framebuffer swaps** (`SWEET FB: swap 1..4 layer 0
+  surface 2/3 1125x2436`) at lines 1404-1429, then **never again**.
+- The kernel's built-in sampler (patch 0054, default `SpringBoard,backboardd`, first sample
+  at 90 s then every 120 s, 10x) fired samples 0-5, i.e. the phone sat on the logo for
+  **>= ~11.5 minutes**.
+- **The decisive evidence:** SpringBoard's and backboardd's thread stacks are **byte-for-byte
+  identical at every one of the six samples** (e.g. `SMP SpringBoard t0 pc 0x21156d030 ...`
+  is the same line at lines 1598/1669/1733/1800/1867/1938). Nothing is progressing; both
+  processes are parked in the same Mach message wait. That is a **deadlock, not slowness**.
+- Everything else is the known-benign pattern already documented for **sweet** (NOTES lines
+  127-130): `IOK backboardd: matching IOProviderClass IOAcceleratorES -> 0 found` x302 (no
+  GPU -> no CoreAnimation renderer), `IODeviceTree:/product -> none` x25, and the
+  `fairplayd.H2` (x68) / `bluetoothd` (x67) relaunch loops. None of these are new.
+- `exec com.apple.datamigrator` runs **twice** (lines 621 and 1299) with **no ProgressUI /
+  migration screen**, which points at the known sweet gate: **SpringBoard blocks in
+  `-[BKSSystemShellService _checkIn]` (a synchronous BSXcall to backboardd, from
+  FBSystemShellInitialize <- SBSystemAppMain), and backboardd holds the shell check-in
+  until data migration finishes** (NOTES line 125). The image **does** carry the v10+
+  migration-skip seeds (`com.apple.migration.plist` `LastSystemVersion 20H392`, uid/gid
+  501 mode 600 binary plist; data ark `-DataMigrationCompleted True`; purplebuddy
+  `SetupDone`), so migration should skip - yet `datamigrator` still runs and nothing
+  advances. **This is the leading hypothesis to confirm, not a proven cause.**
+- Only one crash in the whole log: `CRASH driverkitd[67] sig 9` (SIGKILL), not fatal.
+- Boot cmdline actually packed: `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam
+  -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1
+  wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1
+  sweetfb_noconsole=1 sweetfb_hz=30 sweettouchdelay=120`. The only difference from sweet's
+  home-screen boot (NOTES line 62, kernel 0069) is **`cpus=1` vs `cpus=6`**.
+
+**Real driver bug found and fixed (committed `1b6f9cb`):** `sweet_rpmh_vreg_enable()` in
+patch 0062 still hardcoded sweet's rail (`if (!res || strcmp(res, "ldoc11") || mv < 2950 ||
+mv > 3400)`), so davinci's ADT-driven `ldoc6`/3100 mV was rejected with EINVAL(22):
+`SWEET RPMH: expected ldoc11 and 2950..3400 mV` then `SWEET TOUCH: ldoc6 RPMh enable failed
+22; probes skipped` (log lines 1618-1619) -> no touch. `rh_lookup()` is already
+resource-agnostic, so only the guard was relaxed to accept any `ldocN` in 1700..3600 mV.
+**Not yet built into a kernel.**
 
 - Kernel: fork Actions run `39452552429` (success), artifact `xnu-kernel`, `kernel.development.sweet` SHA256 `b47aee2bc9790c29e39254a31be671c12519c213b6fe66e304832005427eee4e`.
 - Root image (16 GiB journaled case-sensitive HFS+, iOS 16.7.16 / 20H392) built and **flashed by the user** to `userdata`: `out/ios16-root.simg`, 12,145,324,344 B, SHA256 `c5940f22f728b0a1a2d4bab1455ff9a426bead4ca1307b10176fd64d61c33c2f` (raw `out/ios16-root.img` 17,179,869,184 B, SHA256 `d8cd7dd930d370a228b54178649da52841d3eec0d91d051eb401b9be0df1bdca`; fsck clean). Contains the OS root + SystemOS/AppOS cryptexes, keybag, dyld cache and all bring-up tweaks incl. the seeded `com.apple.mobileactivationd` system container + data ark.
 - Phone image (`shim/out/shim-boot-davinci.img`, 17,203,200 B, SHA256 `e9286a67c73488c4dc1971e9be7e059d4ba0b138cfa6b6666667b6fdb9f627c2`): rebuilt with the ADT that now carries the real iPhone X `/product` node (D22AP, needed by MobileGestalt); ramdisk==payload and dtb==stock base verified. Booted with `fastboot boot`, nothing else was flashed.
 
-**NEXT — read the log to find where the boot stalls** (user chose the recovery/adb path; see `docs/davinci-logging.md`):
-1. Drop an OrangeFox (or any `adb root`) recovery for **davinci** at `recovery/recovery.img` (not in git).
-2. `fastboot boot recovery/recovery.img`, then on Windows `tools\sweet-log-pull.cmd logs\boot.txt` (Linux: `tools/sweet-log-pull.sh`). The 4 MiB ring sits in the last 4100 KiB of `userdata`, past our 16 GiB image, so it survives.
-3. Grep `logs/boot.txt` for the last `exec`/`CRASH`/`SWEET` lines and fix the stall; rebuild kernel / boot image / image as needed.
-   - Alternative without a recovery image: `shim/out/shim-boot-davinci-usb.img` (same image + `sweetusb=2`, SHA256 `c47835aac215c243152894b1908d559c7bfc6e2176c98193476785e32ee95728`); capture the live UDP log with `tools\sweet-live-log.cmd` (§B of the doc). Needs the USB-Ethernet link to come up before the hang.
+**NEXT (in order):**
+1. Build a kernel with the touch-RPMh fix via CI, then a boot image whose cmdline samples
+   more processes: `sweetsample=SpringBoard,backboardd,datamigrator,mobileactivationd`
+   (patch 0054 parses a custom comma list from `sweetsample=`). This will show whether
+   `datamigrator` is itself stuck and whether SpringBoard is in `_checkIn`.
+2. Consider a `cpus=6` variant to match sweet's home-screen boot if the sampler shows the
+   stall is migration throughput rather than a hard deadlock.
+3. Rebuild the boot image after any change: `python3 tools/mkpayload.py <KERNEL> shim/out/davinci.adt
+   shim/out/payload.bin --cmdline "<CMDLINE>"` then `DEVICE=davinci PYTHONPATH=/mnt/e/ios-sweet/build/mkbootimg-stub
+   shim/build.sh out/payload.bin` (note: `shim/build.sh` does `cd shim` and always writes
+   `shim-boot-davinci.img`; copy/rename variants and restore the canonical name afterwards).
 4. Any further destructive flash only with explicit user confirmation.
 
-Tooling added for this: `tools/sweet-log-pull.cmd` and `tools/sweet-live-log.cmd` (Windows counterparts of the shell scripts), `docs/davinci-logging.md`. `tools/sweet-log.py` was re-verified against a synthetic wrapped ring: it reconstructs exactly the surviving 4 MiB window.
+Tooling added for this boot: `tools/sweet-log-pull.py` + `tools/sweet-log-pull.cmd` and
+`tools/sweet-live-log.cmd` (Windows counterparts of the shell scripts), plus
+`docs/davinci-logging.md`. The pull now does all arithmetic in Python (64-bit) because both
+`cmd.exe set /a` and the recovery shell wrapped the ~51 GiB block offset (the ring sits past
+our 16 GiB image in `userdata`, so it survives reflashes).
 
 ### Earlier (2026-10-20, davinci port)
 
