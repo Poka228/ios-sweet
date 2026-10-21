@@ -1,8 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-20, davinci port)
+## Agent handoff / active work (2026-10-21, davinci first boot)
 
-**STATE:** the tree builds a **Xiaomi Mi 9T (davinci, SM7150-AA)** boot image from the same kernel as sweet. Branch `davinci-port` (baseline `11da58b`), pushed to the `Poka228/ios-sweet` fork because the authenticated account cannot write to `dipa-studio/ios-sweet`. The kernel and the davinci image now exist; nothing has been run on Mi 9T hardware yet.
+**STATE: the Mi 9T boots to the Apple logo and hangs there.** Confirms the shim, the base DTB (+ABL's dtbo merge), early XNU, the framebuffer and the HFS+ root mount all work; the stall is in userspace. No panic. Log not read yet.
+
+- Kernel: fork Actions run `39452552429` (success), artifact `xnu-kernel`, `kernel.development.sweet` SHA256 `b47aee2bc9790c29e39254a31be671c12519c213b6fe66e304832005427eee4e`.
+- Root image (16 GiB journaled case-sensitive HFS+, iOS 16.7.16 / 20H392) built and **flashed by the user** to `userdata`: `out/ios16-root.simg`, 12,145,324,344 B, SHA256 `c5940f22f728b0a1a2d4bab1455ff9a426bead4ca1307b10176fd64d61c33c2f` (raw `out/ios16-root.img` 17,179,869,184 B, SHA256 `d8cd7dd930d370a228b54178649da52841d3eec0d91d051eb401b9be0df1bdca`; fsck clean). Contains the OS root + SystemOS/AppOS cryptexes, keybag, dyld cache and all bring-up tweaks incl. the seeded `com.apple.mobileactivationd` system container + data ark.
+- Phone image (`shim/out/shim-boot-davinci.img`, 17,203,200 B, SHA256 `e9286a67c73488c4dc1971e9be7e059d4ba0b138cfa6b6666667b6fdb9f627c2`): rebuilt with the ADT that now carries the real iPhone X `/product` node (D22AP, needed by MobileGestalt); ramdisk==payload and dtb==stock base verified. Booted with `fastboot boot`, nothing else was flashed.
+
+**NEXT — read the log to find where the boot stalls** (user chose the recovery/adb path; see `docs/davinci-logging.md`):
+1. Drop an OrangeFox (or any `adb root`) recovery for **davinci** at `recovery/recovery.img` (not in git).
+2. `fastboot boot recovery/recovery.img`, then on Windows `tools\sweet-log-pull.cmd logs\boot.txt` (Linux: `tools/sweet-log-pull.sh`). The 4 MiB ring sits in the last 4100 KiB of `userdata`, past our 16 GiB image, so it survives.
+3. Grep `logs/boot.txt` for the last `exec`/`CRASH`/`SWEET` lines and fix the stall; rebuild kernel / boot image / image as needed.
+   - Alternative without a recovery image: `shim/out/shim-boot-davinci-usb.img` (same image + `sweetusb=2`, SHA256 `c47835aac215c243152894b1908d559c7bfc6e2176c98193476785e32ee95728`); capture the live UDP log with `tools\sweet-live-log.cmd` (§B of the doc). Needs the USB-Ethernet link to come up before the hang.
+4. Any further destructive flash only with explicit user confirmation.
+
+Tooling added for this: `tools/sweet-log-pull.cmd` and `tools/sweet-live-log.cmd` (Windows counterparts of the shell scripts), `docs/davinci-logging.md`. `tools/sweet-log.py` was re-verified against a synthetic wrapped ring: it reconstructs exactly the surviving 4 MiB window.
+
+### Earlier (2026-10-20, davinci port)
+
+**STATE:** the tree builds a **Xiaomi Mi 9T (davinci, SM7150-AA)** boot image from the same kernel as sweet. Branch `davinci-port` (baseline `11da58b`), pushed to the `Poka228/ios-sweet` fork because the authenticated account cannot write to `dipa-studio/ios-sweet`.
 
 - Kernel: fork Actions run `39452552429` (success), artifact `xnu-kernel`, `kernel.development.sweet` SHA256 `b47aee2bc9790c29e39254a31be671c12519c213b6fe66e304832005427eee4e`.
 - Phone image: `shim/out/shim-boot-davinci.img`, 17,199,104 bytes, SHA256 `d3795c60ad3daa4cddb14dcd88bd829d4de2490194b0febcb893f94dcc946b5f` = shim `DEVICE=davinci` + payload (kernel + `shim/out/davinci.adt` + `cpus=1 sweettouchdelay=120`) + the base `qcom,sdmmagpie` DTB from the MIUI 12 boot dump. Packed ramdisk == payload and packed DTB == `dtb/boot_unpacked/dtb` (verified with `tools/unpack_bootv2.py`). Boot it temporarily, nothing is flashed: `fastboot boot shim-boot-davinci.img` (on Windows: `fastboot boot E:\ios-sweet\shim\out\shim-boot-davinci.img`).
