@@ -178,13 +178,19 @@ def os_features(root):
     deviceConfiguredForHRN returns true at 0x181c2597c and lsd computes the
     vendor identifier locally, with no XPC. HRN is absent from the stock domain
     plist, so os_feature_enabled defaults it to false.
+
+    NB the flag body must be {'Enabled': True} ALONE. init_featureflags rejects a
+    flag that has both Enabled and DevelopmentPhase ("A flag cannot have both
+    Enabled and DevelopmentPhase keys") and then drops the whole key, which
+    silently leaves the flag unset (observed on the 2026-10-21 c1-lsd2 boot).
+    Shipped plists use one or the other, e.g. AppStore.plist has both forms.
     """
     path = os.path.join(root, 'System/Library/FeatureFlags/Domain',
                         'DeviceManagementClient.plist')
     st = os.stat(path)
     data = load(path)
-    data.setdefault('HRN', {}).update(
-        {'Enabled': True, 'DevelopmentPhase': 'FeatureComplete'})
+    # Assign (do not update) so no stale DevelopmentPhase can survive.
+    data['HRN'] = {'Enabled': True}
     save(path, data, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
     print('os_feature DeviceManagementClient.HRN enabled')
     # Belt and braces: the same flag in the Global layer, which
@@ -192,8 +198,7 @@ def os_features(root):
     gpath = os.path.join(root, 'System/Library/FeatureFlags/Global.plist')
     st = os.stat(gpath)
     g = load(gpath)
-    g.setdefault('DeviceManagementClient', {}).setdefault('HRN', {}).update(
-        {'Enabled': True, 'DevelopmentPhase': 'FeatureComplete'})
+    g.setdefault('DeviceManagementClient', {})['HRN'] = {'Enabled': True}
     save(gpath, g, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
     print('os_feature Global DeviceManagementClient.HRN enabled')
 
