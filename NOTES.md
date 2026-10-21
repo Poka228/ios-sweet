@@ -154,18 +154,23 @@ reports anything. So SpringBoard (and mobileactivationd) block forever in
 0xe00002c7` (AKS), `fairplayd.H2`/`bluetoothd` relaunch loop, `SWEET Sandbox: … privilege
 denied` for symptomsd/aggregated — all known-benign (they also occur on sweet).
 
+The lsd stack question above was answered by that sampling boot: lsd's t0 is in
+`performJournalRecovery`'s `dispatch_sync` on `com.apple.lsd.observers`, waiting on lsd t5,
+which is in the HRN activation-record XPC to mobileactivationd — the three-way deadlock at
+the top of this file. The os_feature fix removes lsd t5 from the cycle.
+
 **NEXT (in order):**
-1. **Boot the same fixed image with `sweetsample=lsd,SpringBoard,backboardd,mobileactivation,containermanagerd`**
-   (touch delay 200 s) to capture lsd's stack and see whether lsd is stuck, crashed, or just
-   slow building the database. Build a new variant with `tools/mkboot-variant.sh`.
-2. If `lsd` is stuck in a `_LSCopyServerStore`-side call (e.g. waiting on
-   `containermanagerd`, `mobilegestalt`, or an mmap/FS op), fix that dependency.
-3. If `lsd` is slow (first-boot DB build), check whether it is actually scanning the root
-   image's bundles and whether it ever completes.
-4. Keep touch (`sweettouchdelay=200`) out of the critical window; `sweettouch=0` still in
-   reserve.
-5. Any further destructive flash only with explicit user confirmation (the current image is
-   already flashed and contains the fix).
+1. `img2simg out/ios16-root.img out/ios16-root.simg` (detached, >15 min) to package the
+   HRN-tweaked image.
+2. Ask the user for explicit confirmation, then
+   `fastboot flash -S 512M userdata out/ios16-root.simg` and
+   `fastboot boot shim/out/shim-boot-davinci-c1-lsd2.img` (same cmdline as `c1-lsd`; SHA
+   `2f7d8dde55b374f769e2e9226b36564aa3b8196e7ac55ee813d2d21e897c6d48`).
+3. Verify: if HRN is now true, `lsd` never issues the mobileactivationd XPC; look for
+   SpringBoard/backboardd/mobileactivationd getting PAST `__LSCopyServerStore` and the log
+   moving beyond the Apple-logo hang. If it still deadlocks, check that
+   `init_featureflags` built `com.apple.featureflags.shm` before lsd queried the flag.
+4. Any destructive flash only with explicit user confirmation.
 
 **Symbolication recipe:** `/tmp/opencode/ipsw` (prebuilt 3.1.739; re-download after a server
 restart, ~108 MB) with the image's `dyld_shared_cache_arm64*` copied to `/tmp/opencode/dsc`;
