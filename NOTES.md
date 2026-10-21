@@ -1,6 +1,65 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, actdiag boot log read)
+## Agent handoff / active work (2026-10-21, scan boot: mobileactivationd assert found)
+
+**STATE: the `scan` image (`sweetscan=mobileactivation,...`) printed the `mobileactivationd`
+assert strings. The crash cause is a USERSPACE container/permission failure, not the kernel
+and not touch:**
+
+```
+STR Error Domain=com.apple.MobileActivation.ErrorDomain Code=-1
+    "Failed to set backup exclusion on container path."
+    UserInfo={NSUnderlyingError=... {Error ... don't have permission to save the file ...}}
+    NSFilePath=/private/var/containers/Data/System/7D5F4CDD-1529-4133-9E26-8E449AFC95B3/
+STR dlsym(RTLD_MAIN_ONLY, os_crash_function): symbol not found
+```
+
+So mobileactivationd calls `-[NSURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey
+error:]` (imports `_CFURLSetResourcePropertyForKey`, `_NSURLIsExcludedFromBackupKey`) on its
+system container and the operation fails, it throws, and (because `os_crash_function` is
+missing, see below) traps at `0x1001bf504 = brk #0x1` instead of writing a clean crash report.
+
+**Two concrete sub-problems:**
+1. **Container UUID mismatch.** The image's mobileactivationd container is
+   `/private/var/containers/Data/System/D90C94C4-F94E-4FCF-8A28-A93BE3846D8E/` (seeded by
+   `tools/sweet-root-tweaks.py`; metadata plist `MCMMetadataIdentifier =
+   com.apple.mobileactivationd`, `MCMMetadataUUID = D90C94C4-...`). At runtime MCM resolves
+   the container to **`7D5F4CDD-1529-4133-9E26-8E449AFC95B3`**, which does **not** exist in
+   the image, so the backup-exclusion write fails. (Apple's MCM UUID is keyed-SHA1, not a
+   plain UUIDv3/v5 of the identifier, so it cannot be reproduced offline -> the fix must make
+   MCM accept the seeded UUID, or seed the UUID MCM will compute at runtime, or make the
+   failing write succeed.)
+2. **`os_crash_function` is missing** (`dlsym(RTLD_MAIN_ONLY, os_crash_function): symbol not
+   found`). libsystem tries to call it to emit a crash log; our AMFI/libsystem stubs do not
+   provide it, so the assert path degrades to a raw `brk` with no message. Providing an
+   `os_crash`-style symbol (or making `os_crash` a no-op returning cleanly) would at least
+   give readable crashes.
+
+**This boot also shows touch is NOT the reliable hang cause:** it printed only
+`SWEET TOUCH: starting in 30 s` (line 113) and **never** reached `mapping GCC/TLMM/SE7`,
+yet the machine still went silent — so the earlier "touch MMIO hang" reading was a
+coincidence of timing. mobileactivationd crashed 3x here too (same `brk` site).
+
+**scan log:** `logs/boot.txt`, 1794 lines, SHA256
+`92b335f4e0fe4357eebc921304aff613dd22d7dc0ae76c0d69f644f5ccda8c7d`; raw
+`tools/logs/boot.txt.bin` header `total 122992 seq 3` -> complete. Image
+`shim/out/shim-boot-davinci-scan.img` SHA256
+`d02883e3fbf39dddb2747bbf291fd3700963e0e467bb90da52acb183117fb7a2`.
+
+**NEXT (in order):**
+1. **Fix the container permission / backup-exclusion failure.** Options, cheapest first:
+   (a) inspect whether our HFS+ + kernel actually implements `setxattr` for
+   `com.apple.metadata:com_apple_backup_excludeItem` and the `UF_NODUMP`/`UF_IMMUTABLE` path
+   `setResourcePropertyForKey` uses; (b) pre-create the runtime UUID container
+   `7D5F4CDD-1529-4133-9E26-8E449AFC95B3` in the image with ownership `mobileactivationd`
+   and the backup-exclusion xattr already set, so the write is a no-op/succeeds;
+   (c) check `tools/sweet-root-tweaks.py` seeding against what MCM expects.
+2. **Provide `os_crash_function`** so future asserts print a real reason instead of a bare
+   `brk`.
+3. Re-confirm the touch `ldoc6` fix once the machine survives long enough (touch ran here only
+   to "starting in 30 s").
+
+## Agent handoff (2026-10-21, actdiag boot log read)
 
 **STATE: `actdiag` (same kernel as `touch6`, but `sweettouchdelay=30` +
 `sweetscan=mobileactivationd`) got further than `touch6`, touch finally STARTED, and then the
