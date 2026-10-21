@@ -197,18 +197,19 @@ which is in the HRN activation-record XPC to mobileactivationd — the three-way
 the top of this file. The os_feature fix removes lsd t5 from the cycle.
 
 **NEXT (in order):**
-1. `img2simg out/ios16-root.img out/ios16-root.simg` — DONE (12,145,324,344 B, same size as
-   before, header `total_blks 4194304 × 4096 = 16 GiB`, `total_chunks 27812`). Raw image
-   re-mounted read-only and both plists re-read from disk: `HRN -> Enabled: true` present.
-   Sparse SHA256 `0fd412059fec7bf60112a4be95940a7a52b4aa21a2fb5dfb514dc9c5fbe7afab`.
+1. `img2simg out/ios16-root.img out/ios16-root.simg` — DONE again after the corrected tweak
+   (12,145,324,344 B, header `total_blks 4194304 × 4096 = 16 GiB`, `total_chunks 27812`).
+   Raw image re-mounted rw (`force`), tweak re-applied, both plists re-read:
+   `HRN -> {Enabled: True}` (domain) and `DeviceManagementClient.HRN -> {Enabled: True}`
+   (Global), matching the shipped leaf form; unmounted, fsck clean, re-`img2simg`'d.
+   New sparse SHA256 in `out/ios16-root.simg.sha256`.
 2. Ask the user for explicit confirmation, then
    `fastboot flash -S 512M userdata out/ios16-root.simg` and
    `fastboot boot shim/out/shim-boot-davinci-c1-lsd2.img` (same cmdline as `c1-lsd`; SHA
    `2f7d8dde55b374f769e2e9226b36564aa3b8196e7ac55ee813d2d21e897c6d48`).
-3. Verify: if HRN is now true, `lsd` never issues the mobileactivationd XPC; look for
-   SpringBoard/backboardd/mobileactivationd getting PAST `__LSCopyServerStore` and the log
-   moving beyond the Apple-logo hang. If it still deadlocks, check that
-   `init_featureflags` built `com.apple.featureflags.shm` before lsd queried the flag.
+3. Verify from the new log: (a) `init_featureflags` must NOT log the "cannot have both"
+   error any more; (b) `lsd` t0 must get past `performJournalRecovery`; (c) SpringBoard /
+   mobileactivationd must get past `__LSCopyServerStore`.
 4. Any destructive flash only with explicit user confirmation.
 
 **Symbolication recipe:** `/tmp/opencode/ipsw` (prebuilt 3.1.739; re-download after a server
