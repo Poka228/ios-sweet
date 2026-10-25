@@ -42,25 +42,33 @@ What we had that they do NOT need, and that is the prime suspect for our lsd dea
 **Adopted in commit `d795134` (branch `davinci-port`):** their 0010/0012/0061/0062/0082/0083
 verbatim, our 0082 removed, `tools/mkadt.py` = theirs (sweet constants + `FB_H 2340` +
 `/pram`, our `/product` node still comes from `research/ipsw-x/d22ap.adt`), README updated.
-Kernel CI: fork run **`40197035244`** (`gh run watch 40197035244 -R Poka228/ios-sweet`).
+Kernel CI: fork run **`40197035244`** (success, 7m06s, patch 0082/0083 applied clean) ->
+`kernel.development.sweet` SHA256 `056b27bf45958d66fe7519bb753d1cadaaef0c88dfb16c845ab2c15a7fd87d76`,
+installed in `xnu/out/`.
+
+**READY TO BOOT (not flashed):** `shim/out/shim-boot-davinci-ref.img`, 17,203,200 B, SHA256
+`fc9fd8694ce5d930eb2850eb58fb5c2002ff604d4e9a75d670ec52505335bde5` = shim `DEVICE=davinci`
+(`FB_H 2340`) + payload (`payload-davinci-ref.bin` SHA256 `638cd63c…`) with
+`shim/out/davinci.adt` (SHA256 `4de948be…`, dump: `sweet-fbcon` 1080x2340, `pram`
+`0x1fcb00000` 1 MiB, `dram-size 0xfcb00000`, `/product` present, no `sweet-touch`) and their
+exact cmdline (`cpus=6`, no `sweettouchdelay`, no `sweetsample`,
+no `davinci_touch_probeonly`). Verified: packed ramdisk == payload, packed DTB ==
+`dtb/boot_unpacked/dtb`.
 
 **NEXT:**
-1. `gh run download 40197035244 -R Poka228/ios-sweet -n xnu-kernel -D xnu/out` and check the
-   patch series applied cleanly (0082/0083 are the only new ones).
-2. `python3 tools/mkadt.py shim/out/davinci.adt --highmem` (already rebuilt, 12,772 B; it is
-   the sweet ADT + `FB_H 2340` + `/pram` + the iPhone X `/product`), then
-   `tools/mkboot-variant.sh davinci-ref <kernel> shim/out/davinci.adt "<their exact cmdline>"`
-   with `debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0
-   unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1
-   launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30` — no `sweettouchdelay`,
-   no `sweetsample`, no `davinci_touch_probeonly` on the first boot.
-3. `fastboot boot` it **on the image that is on the phone** (containers seeded, no HRN flag).
-   If the lock screen appears, the extra image tweaks are irrelevant; if lsd deadlocks again,
-   rebuild the image without them (mount rw, delete the HRN key from
+1. **Boot `shim/out/shim-boot-davinci-ref.img` with `fastboot boot`** (temporary, nothing is
+   flashed) on the image that is on the phone (containers seeded, no HRN flag). Expect ~4-5
+   min of the Apple logo with `cpus=6`; the 0079 panel fade means the display blanked, not a
+   reset. If the lock screen appears, the extra image tweaks are irrelevant; if lsd deadlocks
+   again, rebuild the image without them (mount rw, delete the HRN key from
    `DeviceManagementClient.plist` and `private/var/containers/Data/System/*`, fsck,
    `img2simg`) and reflash `userdata` — **destructive, ask the user right before**.
-4. Then enable touch with `davinci_touch_probeonly=0` and verify the GT9886 probe line
-   (`DAVINCI TOUCH: GT9886 Normandy identified`).
+2. Pull the log from recovery (`tools/sweet-log-pull.sh`) and check for a new
+   `DAVINCI TOUCH: GT9886` line and whether `lsd`/`mobileactivationd` still hit
+   `__LSCopyServerStore`.
+3. Then re-boot with `davinci_touch_probeonly=0` appended and verify
+   `DAVINCI TOUCH: GT9886 Normandy identified` + `1080x2340 touch polling enabled` and that
+   the digitizer reaches SpringBoard (patch 0083 fixes the bottom edge).
 
 ## Agent handoff (2026-10-21 late: lsd deadlock ROOT-CAUSED; HRN fix re-applied in the CORRECT plist form)
 
