@@ -17,10 +17,6 @@ screen (image versions v8-v14 in NOTES.md):
   migration       LastSystemVersion so DataMigration does not run for an hour
                   on every boot
   audio           VirtualAudio HAL plug-in disabled (mediaserverd crash)
-  os_features     DeviceManagementClient.HRN os_feature flag enabled so lsd's
-                  +[LSHRNSupport deviceConfiguredForHRN] short-circuits instead
-                  of doing a synchronous activation-record XPC to
-                  mobileactivationd (that XPC is the lsd three-way deadlock)
   MediaToolbox    StartRecorderServer=false (camera filter prewarm calls a
                   NULL OpenGL function without a GPU -> mediaserverd crash loop)
   SpringBoard     BKNoWatchdogs (one slow CPU path, no scene-create watchdog
@@ -29,11 +25,7 @@ screen (image versions v8-v14 in NOTES.md):
                   mini-buddy flags off
   activation      mobileactivationd data ark seeded; the actual Activated state
                   comes from its Hactivation branch, selected by the /chosen
-                  security-status properties in tools/mkadt.py. The container is
-                  seeded at BOTH the legacy UUID and the runtime UUID
-                  containermanagerd resolves (7D5F4CDD-...), because the daemon
-                  traps at brk #0x1 if setResourceValue:NSURLIsExcludedFromBackupKey
-                  fails on the missing runtime container path.
+                  security-status properties in tools/mkadt.py
 """
 import glob, os, plistlib, shutil, sys
 
@@ -98,109 +90,21 @@ def find_container(root, kind, identifier):
     return None
 
 
-# UUID of the com.apple.mobileactivationd system container. On iOS this lives
-# on the data volume and is created by containermanagerd; our image is a single
-# volume with no /private/var/containers at all (mkiosroot.sh only copies the
-# OS root), so the container has to be seeded here.
-#
-# containermanagerd resolves the container to a UUID derived from the
-# identifier (a keyed hash, not reproducible offline). On davinci that runtime
-# UUID is 7D5F4CDD-1529-4133-9E26-8E449AFC95B3 and it is IDENTICAL in every
-# boot: mobileactivationd then does setResourceValue:NSURLIsExcludedFromBackupKey
-# on the container path, that path did not exist (only the old D90C94C4-... was
-# seeded), the call failed, it threw and trapped at brk #0x1 -> the daemon
-# never answers MadGate getActivationState -> SBLockdownManager
-# _setupActivationState blocks SpringBoard's main thread forever (proved by
-# ipsw symbolication of the t200 sampler stack, NOTES.md 2026-10-21).
-#
-# Seed the container at BOTH UUIDs so whichever one containermanagerd computes
-# finds an existing, correctly-owned directory. D90C94C4-... is what the working
-# sweet image v14 used and is kept so find_container() still locates the ark.
-MOBILEACTIVATIOND_UUID = 'D90C94C4-F94E-4FCF-8A28-A93BE3846D8E'
-MOBILEACTIVATIOND_RUNTIME_UUID = '7D5F4CDD-1529-4133-9E26-8E449AFC95B3'
-
-
-def make_system_container(root, uuid, identifier):
-    """Create a Data/System container with the metadata containermanagerd reads."""
-    c = os.path.join(root, 'private/var/containers/Data/System', uuid)
-    os.makedirs(c, exist_ok=True)
-    os.chown(c, 0, 0)
-    os.chmod(c, 0o755)
-    save(os.path.join(c, '.com.apple.mobile_container_manager.metadata.plist'), {
-        'MCMMetadataIdentifier': identifier,
-        'MCMMetadataUUID': uuid,
-        'MCMMetadataContentClass': 1,
-        'MCMMetadataMinOSVersion': '16.0',
-        'MCMMetadataInfoMinOSVersion': '16.0',
-        'MCMMetadataDataSeparatedShareUUID': uuid,
-        'MCMMetadataUserIdentity': '0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0',
-        'MCMMetadataIsDataSeparated': False,
-    }, 0, 0, 0o644)
-    print('system container', identifier, uuid)
-    return c
-
-
 def activation(root):
     c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
     if c is None:
-        c = make_system_container(root, MOBILEACTIVATIOND_UUID, 'com.apple.mobileactivationd')
-    # Also seed the UUID containermanagerd resolves at runtime: the daemon does
-    # setResourceValue:NSURLIsExcludedFromBackupKey on THAT path and traps when
-    # it is missing (see MOBILEACTIVATIOND_RUNTIME_UUID above).
-    if find_container(root, 'Data/System', MOBILEACTIVATIOND_RUNTIME_UUID) is None:
-        make_system_container(root, MOBILEACTIVATIOND_RUNTIME_UUID,
-                              'com.apple.mobileactivationd')
-    ark = {
+        print('warning: no mobileactivationd system container in the image; skipped data ark')
+        return
+    d = os.path.join(c, 'Library/internal')
+    os.makedirs(d, exist_ok=True)
+    os.chown(d, MOBILE, MOBILE)
+    os.chmod(d, 0o755)
+    save(os.path.join(d, 'data_ark.plist'), {
         '-ActivationState': 'Activated', '-BrickState': False,
         '-BuildVersion': BUILD, '-ProductVersion': VERSION,
         '-DataMigrationCompleted': True, '-PreSydroDataMigrationCompleted': True,
-    }
-    for uuid in (MOBILEACTIVATIOND_UUID, MOBILEACTIVATIOND_RUNTIME_UUID):
-        d = os.path.join(root, 'private/var/containers/Data/System', uuid, 'Library/internal')
-        os.makedirs(d, exist_ok=True)
-        os.chown(d, MOBILE, MOBILE)
-        os.chmod(d, 0o755)
-        save(os.path.join(d, 'data_ark.plist'), ark, MOBILE, MOBILE, 0o600)
-        print('data ark', d)
-
-
-def os_features(root):
-    """Enable the DeviceManagementClient.HRN os_feature flag.
-
-    LaunchServices' +[LSHRNSupport deviceConfiguredForHRN] asks
-    os_feature_enabled_impl("DeviceManagementClient", "HRN"). When that is
-    FALSE it falls through to MAECopyActivationRecordWithError, a synchronous
-    XPC to mobileactivationd. On this boot lsd services an
-    identifierForVendor/__LSCopyServerStore XPC FROM a process whose
-    LaunchServices query can only complete once lsd answers it, so lsd waits on
-    mobileactivationd, which waits on lsd: a three-way deadlock (lsd t0 -> lsd
-    t5 -> mobileactivationd -> lsd t0, NOTES.md 2026-10-21). With HRN enabled
-    deviceConfiguredForHRN returns true at 0x181c2597c and lsd computes the
-    vendor identifier locally, with no XPC. HRN is absent from the stock domain
-    plist, so os_feature_enabled defaults it to false.
-
-    NB the flag body must be {'Enabled': True} ALONE. init_featureflags rejects a
-    flag that has both Enabled and DevelopmentPhase ("A flag cannot have both
-    Enabled and DevelopmentPhase keys") and then drops the whole key, which
-    silently leaves the flag unset (observed on the 2026-10-21 c1-lsd2 boot).
-    Shipped plists use one or the other, e.g. AppStore.plist has both forms.
-    """
-    path = os.path.join(root, 'System/Library/FeatureFlags/Domain',
-                        'DeviceManagementClient.plist')
-    st = os.stat(path)
-    data = load(path)
-    # Assign (do not update) so no stale DevelopmentPhase can survive.
-    data['HRN'] = {'Enabled': True}
-    save(path, data, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
-    print('os_feature DeviceManagementClient.HRN enabled')
-    # Belt and braces: the same flag in the Global layer, which
-    # init_featureflags also folds into com.apple.featureflags.shm.
-    gpath = os.path.join(root, 'System/Library/FeatureFlags/Global.plist')
-    st = os.stat(gpath)
-    g = load(gpath)
-    g.setdefault('DeviceManagementClient', {})['HRN'] = {'Enabled': True}
-    save(gpath, g, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
-    print('os_feature Global DeviceManagementClient.HRN enabled')
+    }, MOBILE, MOBILE, 0o600)
+    print('data ark', d)
 
 
 def audio(root):
@@ -225,7 +129,6 @@ def main():
     launchd(root)
     containers(root)
     activation(root)
-    os_features(root)
     audio(root)
     merge_pref(root, 'com.apple.migration', {
         'LastSystemVersion': BUILD,
