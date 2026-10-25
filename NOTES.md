@@ -52,8 +52,12 @@ verified from a read-only remount.
 
 `fastboot.exe -S 512M flash userdata E:\ios-sweet\out\ios16-root.img` (raw, 16 GiB) dies with
 `std::bad_alloc` — the Windows binary tries to sparse the whole file in memory. Build the
-sparse image locally instead: `img2simg out/ios16-root.img out/ios16-root-seeded.simg`
-(~12 GiB, 10-20 min) and flash that with `-S 512M`.
+sparse image locally instead. `img2simg` is unusable here too: it reads in 4 KiB pieces and
+crawls at ~9 MB/s on DrvFs. Use `tools/mksparse.py IN.img OUT.simg` (8 MiB block reads):
+16 GiB -> 12.15 GiB sparse in 3m16s on this machine, verified byte-identical with
+`simg2img OUT.simg verify.img` + sha256. Flash the sparse file without `-S`.
+
+(First attempt: `ios16-root-seeded.simg`, raw sha256 `01457960c7de…`, flashed 2026-10-25.)
 
 ### NEXT
 
