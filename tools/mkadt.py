@@ -2,70 +2,37 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the board's live FDT (verify with tools/fdt-device.py).
-Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--device sweet|davinci]
+address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
 """
 import hashlib, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
-# Per-board constants. All SM7150 boards share the SoC blocks (GIC, UFS,
-# timer); only the DDR split, the panel and the input hardware differ.
-# `xiaomi,sweet` is kept as the platform-expert match token on every board
-# (SweetPlatformExpert IONameMatch); `xiaomi,<device>` names the actual board.
-DEVICES = {
-    'sweet': {
-        'board': 'xiaomi,sweet',
-        # Kernel-managed low RAM (QEMU / --highmem off), above the XPU carve-outs
-        'low_dram': (0xb0000000, 0x4d000000),
-        # --highmem (phone only): the whole upper DDR bank. The live FDT memory
-        # node is <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed
-        # reserved-memory carve-out is in the low bank and the dynamic pools
-        # are limited below 4G.
-        'high_dram': (0x100000000, 0xfcc00000),
-        'soc': 'sm7150',
-        # Splash framebuffer: base, width, height (a8r8g8b8, stride = w*4)
-        'fb': (0x9c000000, 1080, 2400),
-        # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
-        'ufs': (0x01d84000, 0x3000),
-        # Descriptive CPU clocks (the bootloader owns DVFS): A55, A76
-        'cpu_clock': (1804800000, 2304000000),
-        # Touch power: RPMh resource, mV, TLMM pin gating the 1.8 V rail,
-        # and the TLMM base the driver maps. The bus itself (QUPv3 SE7
-        # 0xa84000, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ, Goodix 0x5d) is
-        # identical on both boards. sweet keeps the historical 0x03900000
-        # that has always worked on the phone (see docs/davinci-hw.md).
-        'touch': ('ldoc11', 3200, 90, 0x03900000),
-    },
-    'davinci': {
-        'board': 'xiaomi,davinci',
-        # Mi 9T: 6 GiB LPDDR4X, 2 GiB low + 4 GiB upper. Confirmed by the
-        # bootloader-patched live FDT (sm7150-mainline/downstream-fdt
-        # fdt-davinci): /memory = <0x80000000 0x80000000> and
-        # <0x1_00000000 0xfcc00000>, with the dynamic pools below 4G.
-        'low_dram': (0xb0000000, 0x4d000000),
-        'high_dram': (0x100000000, 0xfcc00000),
-        'soc': 'sm7150',
-        # 1080x2340 AMOLED (vs 1080x2400 on sweet)
-        'fb': (0x9c000000, 1080, 2340),
-        'ufs': (0x01d84000, 0x3000),
-        # Kryo 470: 6x A55 @1.8 GHz, 2x A76 @2.2 GHz
-        'cpu_clock': (1804800000, 2208000000),
-        # Xiaomi davinci DTS: vtouch-supply = pm6150l_l6 (RPMh ldoc6, the
-        # regulator tops out at 3.1 V), goodix,avdd-gpio = TLMM 5 (1.8 V).
-        # The live FDT puts pinctrl@3400000 at the sdmmagpie TLMM base.
-        'touch': ('ldoc6', 3100, 5, 0x03400000),
-    },
-}
-
+# Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
+PHYS_BASE = 0xb0000000
+MEM_SIZE = 0x4d000000
+# Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
+# /pram + /chosen/embedded-panic-log-size. Without it, pe_init.c's
+# check_for_panic_log() leaves gPanicBase == 0, debug_log_init() bails out twice
+# and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
+# and independently on ios-fajita.
+PANIC_LOG_SIZE = 0x100000
+# --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
+# <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
+# carve-out is in the low bank and the dynamic pools are limited below 4G.
+HIGH_PHYS_BASE = 0x100000000
+HIGH_MEM_SIZE = 0xfcc00000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
 GICD, GICD_SIZE = 0x17a00000, 0x10000
 GICR, GICR_SIZE = 0x17a60000, 0x100000
-FB_SIZE = 0x1700000
+FB, FB_SIZE = 0x9c000000, 0x1700000
 SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
+FB_W, FB_H, FB_STRIDE = 1080, 2340, 1080 * 4
+# Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
+UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -107,15 +74,13 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, device='sweet'):
-    """qemu=True: same tree, but with QEMU virt's GIC and CNTFRQ (tools/qemu-sweet.py)."""
-    dev = DEVICES[device]
-    phys_base, mem_size = dev['high_dram'] if highmem else dev['low_dram']
+def build(seed=None, qemu=False, highmem=False):
+    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
+    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    # Carve the panic log off the top so the kernel never allocates over it.
+    panic_base = phys_base + mem_size - PANIC_LOG_SIZE
+    mem_size -= PANIC_LOG_SIZE
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
-    fb_base, fb_w, fb_h = dev['fb']
-    fb_stride = fb_w * 4
-    ufs_base, ufs_size = dev['ufs']
-    clk_small, clk_big = dev['cpu_clock']
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -126,6 +91,7 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
+        ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
         ('firmware-version', cstr('sweet-shim')),
         ('system-firmware-version', cstr('sweet-shim')),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
@@ -183,7 +149,7 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(clk_big if core >= 6 else clk_small)),
+            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -225,29 +191,17 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(fb_base, FB_SIZE)),
-        ('width', u32(fb_w)),
-        ('height', u32(fb_h)),
-        ('stride', u32(fb_stride)),
+        ('reg', u64(FB, FB_SIZE)),
+        ('width', u32(FB_W)),
+        ('height', u32(FB_H)),
+        ('stride', u32(FB_STRIDE)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
     ufs = node('sweet-ufs', [
         ph(),
         ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(ufs_base, ufs_size)),
-    ])
-
-    # bsd/dev/sweet_touch.c: board power wiring and TLMM base (panel size
-    # comes from sweet-fbcon above). Absent node/properties keep the sweet
-    # defaults.
-    vreg, vreg_mv, power_gpio, tlmm_base = dev['touch']
-    touch = node('sweet-touch', [
-        ph(),
-        ('vreg-name', cstr(vreg)),
-        ('vreg-mv', u32(vreg_mv)),
-        ('power-gpio', u32(power_gpio)),
-        ('tlmm-base', u32(tlmm_base)),
+        ('reg', u64(UFS, UFS_SIZE)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -268,34 +222,29 @@ def build(seed=None, qemu=False, highmem=False, device='sweet'):
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
+    # Panic log region. /pram reg = <phys size>; it sits just above the
+    # dram-size we expose, so XNU maps it but never allocates into it.
+    pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
+
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
-    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching on
-    # every board; dev['board'] names the actual hardware when it differs.
-    board = [] if dev['board'] == 'xiaomi,sweet' else [dev['board']]
-    compat = ['D22AP', 'iPhone10,3', 'xiaomi,sweet'] + board + ['qcom,sm7150', 'AppleARM']
+    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', b''.join(cstr(c) for c in compat)),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs, touch]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':
-    device = 'sweet'
-    if '--device' in sys.argv:
-        device = sys.argv[sys.argv.index('--device') + 1]
-        if device not in DEVICES:
-            raise SystemExit(f'unknown --device {device} ({", ".join(DEVICES)})')
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, device=device)
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
         adt.dump(adt.parse(blob)[0])
-    print(f'{sys.argv[1]}: {len(blob)} bytes ({device}, {"QEMU virt" if "--qemu" in sys.argv else "phone"}, '
-          f'{"highmem" if "--highmem" in sys.argv else "low"})', file=sys.stderr)
+    print(f'{sys.argv[1]}: {len(blob)} bytes', file=sys.stderr)

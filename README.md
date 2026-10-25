@@ -4,7 +4,7 @@
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
 
-The same kernel and boot image builder also support the **Xiaomi Mi 9T** (`davinci`, SM7150-AA / Snapdragon 730, 1080×2340 panel). Both boards share the SoC blocks, the UFS host, the PMIC wiring and the QUPv3 touch bus, so there is **one kernel binary**; the board differences come from the generated device tree (`tools/mkadt.py --device`) and the shim build (`DEVICE=`). See [Xiaomi Mi 9T (davinci)](#xiaomi-mi-9t-davinci). The davinci bring-up is derived from Xiaomi's published DTS and has not been booted on a Mi 9T yet.
+The same kernel and boot image builder also support the **Xiaomi Mi 9T** (`davinci`, SM7150-AA / Snapdragon 730, 1080×2340 panel). Both boards share the SoC blocks, the UFS host, the PMIC wiring and the QUPv3 touch bus, so there is **one kernel binary**; the board differences are the panel height in the device tree (`tools/mkadt.py`, `FB_H`), the shim build (`DEVICE=`) and the davinci touch driver (patches 0082/0083). See [Xiaomi Mi 9T (davinci)](#xiaomi-mi-9t-davinci).
 
 As of **2026-10-18** the sweet phone boots to the **iOS home screen**. You can unlock it, open Settings, pull down Control Center and the notification center, and use the touchscreen and the hardware buttons. Rendering runs entirely on the CPU; there is no GPU driver.
 
@@ -102,7 +102,7 @@ ipsw img4 im4p extract research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im
 Needs `aarch64-linux-gnu-gcc` and `mkbootimg`.
 
 ```sh
-python3 tools/mkadt.py shim/out/sweet.adt --highmem          # add --device davinci on a Mi 9T
+python3 tools/mkadt.py shim/out/sweet.adt --highmem
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
     --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30'
 shim/build.sh out/payload.bin          # add DEVICE=davinci on a Mi 9T -> shim-boot-<device>.img
@@ -152,13 +152,12 @@ The Mi 9T is the same SM7150 family as the Note 10 Pro, so the kernel is **not**
 | --- | --- | --- |
 | Panel | 1080×2400 AMOLED | 1080×2340 AMOLED (Samsung EA F10, DSI command mode) |
 | Splash framebuffer | `0x9c000000`, 0x1700000 | identical |
-| Touch | Goodix GT9896, I²C `0x5d` on QUPv3 SE7 `0xa84000`, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ | Goodix GT9889, same bus; GPIO6/7 are the QUP11 I²C function, 8 reset, 9 IRQ |
-| Touch power | PM6150L LDO11 (`ldoc11`, 3200 mV), TLMM 90 gate | PM6150L LDO6 (`ldoc6`, 3100 mV), TLMM 5 (1.8 V gate) |
-| TLMM base | `0x03900000` (historical driver value, kept so the working phone is unchanged) | `0x03400000` (from the DTB/live FDT) |
+| Touch | Goodix GT9896 (Yellowstone) or FocalTech 54:52, I²C `0x5d` on QUPv3 SE7 `0xa84000`, TLMM 6/7 SDA/SCL, 8 reset, 9 IRQ | Goodix GT9886 (Normandy), same bus and pins; GPIO90 is the pop-up camera motor and must never be driven |
+| Touch power | PM6150L LDO11 (`ldoc11`, 3200 mV) + TLMM 90 gate | PM6150L LDO6 (`ldoc6`, 3000 mV), no enable pin |
 | Keys | PM6150 PON + PM6150L GPIO2 | identical |
 | UFS / GIC / RPMh / SPMI / IMEM / USB / timer | `0x1d84000` / `0x17a00000` / `0x18220000` / `0xc440000` / `0x146aa65c` / `0xa600000` / 19.2 MHz | identical |
 
-Everything above is encoded in `tools/mkadt.py`'s `davinci` profile and in `shim/device.h`; the touch driver reads the rail, pin and TLMM base from the ADT (`sweet-touch` node), so an old ADT keeps the sweet defaults.
+The panel height is `FB_H` in `tools/mkadt.py` (2400 on sweet, 2340 on davinci) and in `shim/device.h`. Patch 0082 makes the kernel's touch driver davinci-only: it replaces the sweet GT9896/FocalTech probe with the GT9886 protocol and the L6C rail, so a kernel built from this series no longer brings up sweet's touchscreen.
 
 Use the same steps as above with the device-specific commands below. Step 0 (unpacking your Mi 9T's stock `boot.img` into `dtb/boot_unpacked/`) gives the shim the **base** `qcom,sdmmagpie` DTB; the board/panel nodes live in the `dtbo` partition and ABL merges them onto that base during boot, exactly as for a stock boot. The MIUI 12 boot image is header v1 with no header DTB, so the base DTB is in the appended `Image.gz-dtb` collection; extract it with `python3 tools/unpack_bootv2.py dtb/davinci-boot.img dtb/boot_unpacked --scan-dtb` and copy `dtb-01.dtb` over `dtb/boot_unpacked/dtb`.
 
@@ -167,14 +166,14 @@ Use the same steps as above with the device-specific commands below. Step 0 (unp
 # region, panel size, touch node, PMIC keys, SoC block addresses.
 python3 tools/fdt-device.py dtb/boot_unpacked/dtb
 
-python3 tools/mkadt.py shim/out/davinci.adt --highmem --device davinci
+python3 tools/mkadt.py shim/out/davinci.adt --highmem
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/davinci.adt shim/out/payload.bin \
-    --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30 sweettouchdelay=120'
+    --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30'
 DEVICE=davinci shim/build.sh out/payload.bin  # -> shim/out/shim-boot-davinci.img
 fastboot boot shim/out/shim-boot-davinci.img       # temporary boot, nothing is flashed
 ```
 
-For the first bring-up start with `cpus=1` instead of `cpus=6`, and keep `sweettouchdelay=120` so the kernel log can be read before the touch driver touches the bus.
+The touch driver stops after the GT9886 PID probe unless you add `davinci_touch_probeonly=0` to the boot-args.
 
 The iPhone X image is unchanged: it is presented as a 1125×2436 canvas and centre-cropped to the 1080×2340 panel (48 px off the top and bottom); touch coordinates are normalized with the panel size from the ADT. The splash buffer is at the same `0x9c000000` as sweet. The upper DDR bank is `0x100000000` + `0xfcc00000`, confirmed by a bootloader-patched live davinci FDT (ABL fills in `/memory`, so it is not in the static DTB); `tools/fdt-device.py` prints it together with the splash region, the panel, the touch node, the keys and the SoC blocks, so you can re-check it on your own phone.
 
@@ -185,7 +184,7 @@ The iPhone X image is unchanged: it is presented as a 1125×2436 canvas and cent
 | `shim/` | Bare-metal boot shim (C + asm) packed as an Android boot.img v2 |
 | `xnu/patches/` | The XNU patch series (applied in order by CI), plus staging scripts for libpthread, HFS and BearSSL |
 | `.github/workflows/xnu.yml` | Kernel CI build |
-| `tools/mkadt.py` | Generates the Apple Device Tree from the board's MMIO layout (`--device sweet\|davinci`) and the iPhone X identity |
+| `tools/mkadt.py` | Generates the Apple Device Tree from the board's MMIO layout (`FB_H` is the per-board value) and the iPhone X identity |
 | `tools/fdt-device.py` | Prints memory/splash/panel/touch/PMIC facts from a stock `boot.img` DTB or a live FDT (verifies a device profile) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
@@ -230,7 +229,8 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0079 | Display power |
 | 0080 | Network trace |
 | 0081 | USB link state |
-| 0082 | Board values from the ADT: panel size for HID/touch, touch rail, power pin and TLMM base (davinci) |
+| 0082 | davinci touch: Goodix GT9886 (Normandy) protocol, PM6150L L6C rail at 3000 mV, GPIO90 (pop-up camera motor) never touched |
+| 0083 | davinci bottom-edge gestures (SweetHID digitizer mapping) |
 
 ## Key hardware facts
 
