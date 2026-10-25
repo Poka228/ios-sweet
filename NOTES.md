@@ -1,6 +1,68 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21 late: lsd deadlock ROOT-CAUSED; HRN fix re-applied in the CORRECT plist form)
+## Agent handoff / active work (2026-10-25: adopting the proven davinci config from Antcating/ios-davinci)
+
+**STATE: the reference port that reaches the lock screen was analysed against our tree and
+its configuration adopted verbatim; kernel CI build running.**
+
+`https://github.com/Antcating/ios-davinci` is a fork of the SAME `dipa-studio/ios-sweet`
+tree. Patches 0001-0081, `.github/workflows/xnu.yml`, `tools/mkiosroot.sh` and
+`tools/sweet-root-tweaks.py` are **byte-identical** to ours. Their whole davinci port is
+four commits (`e63de31`, `0d39c6e`, `7583059`, `3190120`, ~330 lines):
+
+- `shim/build.sh` (their toolchain/`dtb/davinci.dtb`), `console.h FB_H 2340`, `mkadt.py FB_H 2340`;
+- patches 0010/0012/0061: panel geometry 2400 -> 2340 (early-console white band row
+  `2368*4320` -> `2308*4320`, `EARLY_HEIGHT`, `fLogicalH = native ? 2340 : 2436`,
+  `fOffY = (fLogicalH - 2340) / 2`, digitizer `ny` divisor);
+- patch 0082: **Goodix GT9886 (Normandy)** instead of GT9896/FocalTech — PID reg `0x4535`,
+  event reg `0x4100`, 2-byte header + 8 bytes/contact + whole-packet checksum at `0x5d`,
+  `ldoc6` at exactly 3000 mV, 300 ms rail settle, **GPIO90 is the pop-up camera motor and is
+  never read/configured**, and the driver stops after the PID probe unless
+  `davinci_touch_probeonly=0` is in the boot-args;
+- patch 0083: bottom-edge gestures in `SweetHID.cpp`.
+
+What we had that they do NOT need, and that is the prime suspect for our lsd deadlock:
+
+- **root image extras**: `os_features()` (HRN flag) and `make_system_container()` seeding.
+  Their image is built from the same `mkiosroot.sh` and has NO
+  `/private/var/containers/Data/System` at all; ours has two seeded containers
+  (`D90C94C4…`, `7D5F4CDD…`, verified on `out/ios16-root.img`). In our deadlock the blocked
+  `mobileactivationd`/`SpringBoard` threads sit in `__LSCopyServerStore` — i.e. they are
+  doing a LaunchServices system-container lookup. The reference activates through the ADT
+  `/chosen` security-status (identical keys in both `mkadt.py`) and never needs a container.
+- **`cpus=1` diagnostics**: their proven configuration is `cpus=6` (README: ~4-5 min to the
+  lock screen, `cpus=1` is the fallback). Our "`cpus=6` reset <90 s" observation may be the
+  0079 display-off (`SWEET FB: display off` fades the panel out) rather than a reset.
+- their ADT is the sweet ADT with only `FB_H 2340`; **no `davinci` board profile**, no
+  `sweet-touch` node, no `xiaomi,davinci` token (the platform expert matches `xiaomi,sweet`).
+  They DO carry upstream `1664d63`/`425b251`: the `/pram` panic-log region
+  (`pram { reg }` + `/chosen/embedded-panic-log-size`, 1 MiB carved off the top of DRAM),
+  which our older base (`11da58b`) lacked.
+
+**Adopted in commit `d795134` (branch `davinci-port`):** their 0010/0012/0061/0062/0082/0083
+verbatim, our 0082 removed, `tools/mkadt.py` = theirs (sweet constants + `FB_H 2340` +
+`/pram`, our `/product` node still comes from `research/ipsw-x/d22ap.adt`), README updated.
+Kernel CI: fork run **`40197035244`** (`gh run watch 40197035244 -R Poka228/ios-sweet`).
+
+**NEXT:**
+1. `gh run download 40197035244 -R Poka228/ios-sweet -n xnu-kernel -D xnu/out` and check the
+   patch series applied cleanly (0082/0083 are the only new ones).
+2. `python3 tools/mkadt.py shim/out/davinci.adt --highmem` (already rebuilt, 12,772 B; it is
+   the sweet ADT + `FB_H 2340` + `/pram` + the iPhone X `/product`), then
+   `tools/mkboot-variant.sh davinci-ref <kernel> shim/out/davinci.adt "<their exact cmdline>"`
+   with `debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0
+   unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1
+   launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30` — no `sweettouchdelay`,
+   no `sweetsample`, no `davinci_touch_probeonly` on the first boot.
+3. `fastboot boot` it **on the image that is on the phone** (containers seeded, no HRN flag).
+   If the lock screen appears, the extra image tweaks are irrelevant; if lsd deadlocks again,
+   rebuild the image without them (mount rw, delete the HRN key from
+   `DeviceManagementClient.plist` and `private/var/containers/Data/System/*`, fsck,
+   `img2simg`) and reflash `userdata` — **destructive, ask the user right before**.
+4. Then enable touch with `davinci_touch_probeonly=0` and verify the GT9886 probe line
+   (`DAVINCI TOUCH: GT9886 Normandy identified`).
+
+## Agent handoff (2026-10-21 late: lsd deadlock ROOT-CAUSED; HRN fix re-applied in the CORRECT plist form)
 
 **STATE: the three-way lsd deadlock is fully root-caused and the fix is a one-line
 os_feature flag. `+[LSHRNSupport deviceConfiguredForHRN]` calls
