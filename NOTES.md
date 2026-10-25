@@ -1,6 +1,32 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-25: adopting the proven davinci config from Antcating/ios-davinci)
+## Agent handoff / active work (2026-10-25 late: phone was reflashed to MIUI, iOS root gone)
+
+**STATE: the Mi 9T was reflashed to Android/MIUI while the user was away, so `userdata` no
+longer holds the iOS root. The root image was reverted to the reference configuration and is
+being re-sparsed for a fresh flash; the kernel boot image is ready.**
+
+- `tools/sweet-root-tweaks.py` is now **byte-identical to Antcating/ios-davinci's** (commit
+  `990d716`): `os_features()` (HRN) and the two seeded mobileactivationd containers are gone.
+- `out/ios16-root.img` had exactly those extras, so they were removed on the mounted volume
+  (`DeviceManagementClient.plist` HRN key, `Global.plist` `DeviceManagementClient` sub-dict,
+  `private/var/containers/Data/System/{D90C94C4…,7D5F4CDD…}`); `fsck.hfsplus -fy` reports
+  `The volume iOSRoot appears to be OK`; re-`img2simg` -> `out/ios16-root-clean.simg`.
+- Boot image unchanged: `shim/out/shim-boot-davinci-ref.img` (`fc9fd869…`).
+
+**NEXT (destructive: ask the user right before the flash):**
+1. `fastboot -S 512M flash userdata out/ios16-root-clean.simg` (~7 min, 24 chunks; ABL often
+   hangs afterwards -> Power + Volume down to re-enter fastboot).
+2. `fastboot boot shim/out/shim-boot-davinci-ref.img`, wait 4-5 min on the Apple logo.
+3. Expect the lock screen. If it does not come up, capture the log: **there is no OrangeFox
+   image in `recovery/` any more** (the directory is empty), so either re-download it or boot
+   once more with `sweetusb=2` and use `tools/sweet-usbnet.sh` (patch 0077) — the persistent
+   console ring at the end of userdata needs a recovery shell to read.
+4. `backup/` is empty on this machine: the per-device partition dumps (persist, modemst1/2,
+   fsg, fsc) are NOT here. Worth asking the user where they are before any further
+   partition work.
+
+## Agent handoff (2026-10-25: adopting the proven davinci config from Antcating/ios-davinci)
 
 **STATE: the reference port that reaches the lock screen was analysed against our tree and
 its configuration adopted verbatim; kernel CI build running.**
