@@ -1,30 +1,80 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-25 late: phone was reflashed to MIUI, iOS root gone)
+## Agent handoff / active work (2026-10-25 late night: ROOT CAUSE = mobileactivationd container, image re-seeded)
 
-**STATE: the Mi 9T was reflashed to Android/MIUI while the user was away, so `userdata` no
-longer holds the iOS root. The root image was reverted to the reference configuration and is
-being re-sparsed for a fresh flash; the kernel boot image is ready.**
+**STATE: the blocker is identified and fixed in the image; a new root image with the
+mobileactivationd system containers (and data ark) is built and `fsck`-clean. Flashing is in
+progress (sparse rebuild with `img2simg` after the Windows `fastboot -S` attempt died with
+`std::bad_alloc` on the raw 16 GiB file). Everything else is the reference configuration
+(patches 0010/0012/0061/0062/0082/0083, reference `mkadt.py`, `cpus=6`, exact cmdline).**
 
-- `tools/sweet-root-tweaks.py` is now **byte-identical to Antcating/ios-davinci's** (commit
-  `990d716`): `os_features()` (HRN) and the two seeded mobileactivationd containers are gone.
-- `out/ios16-root.img` had exactly those extras, so they were removed on the mounted volume
-  (`DeviceManagementClient.plist` HRN key, `Global.plist` `DeviceManagementClient` sub-dict,
-  `private/var/containers/Data/System/{D90C94C4…,7D5F4CDD…}`); `fsck.hfsplus -fy` reports
-  `The volume iOSRoot appears to be OK`; re-`img2simg` -> `out/ios16-root-clean.simg`.
-- Boot image unchanged: `shim/out/shim-boot-davinci-ref.img` (`fc9fd869…`).
+### Why there is no lock screen (proven, not guessed)
 
-**NEXT (destructive: ask the user right before the flash):**
-1. `fastboot -S 512M flash userdata out/ios16-root-clean.simg` (~7 min, 24 chunks; ABL often
-   hangs afterwards -> Power + Volume down to re-enter fastboot).
-2. `fastboot boot shim/out/shim-boot-davinci-ref.img`, wait 4-5 min on the Apple logo.
-3. Expect the lock screen. If it does not come up, capture the log: **there is no OrangeFox
-   image in `recovery/` any more** (the directory is empty), so either re-download it or boot
-   once more with `sweetusb=2` and use `tools/sweet-usbnet.sh` (patch 0077) — the persistent
-   console ring at the end of userdata needs a recovery shell to read.
-4. `backup/` is empty on this machine: the per-device partition dumps (persist, modemst1/2,
-   fsg, fsc) are NOT here. Worth asking the user where they are before any further
-   partition work.
+The sampler boot (`logs/boot-2026-10-25-smp.log`,
+`sweetsample=SpringBoard,lsd,mobileactivation,containermanager,backboardd`) symbolicates to:
+
+- SpringBoard t0, every sample: `_mach_msg2_trap` <- `_dispatch_mach_send_and_wait_for_reply`
+  <- `_xpc_connection_send_message_with_reply_sync` <- `-[NSXPCConnection _sendInvocation:...]`
+  <- `-[MadGate getActivationState:]` <- `_MAEGetActivationStateWithError` <-
+  `-[SBLockdownManager _setupActivationState]` <- `-[SBLockdownManager lockdownState]`.
+  **SpringBoard waits forever for an activation-state XPC reply.**
+- `lsd` t0 and `containermanagerd` t0 are **healthy and idle** in their own run loops
+  (`__LSServerMain` / `__containermanagerd_main`), so LaunchServices is *not* the blocker now
+  (the Oct 21 lsd hang was a different, self-inflicted one:
+  `-[_LSInstallProgressService performJournalRecovery]` -> `__dispatch_sync_f_slow`, with
+  `restoreInactiveInstalls` on the other side and clients parked in
+  `LAUNCH_SERVICES_CLIENTS_ARE_WAITING_FOR_THE_DATABASE_TO_FINISH_SEEDING`).
+- `mobileactivationd` SIGTRAPs at startup every ~1 s: `CRASH mobileactivation sig 5
+  code 0x600000001`, `pc == lr == mh + 0x1BF504`, call site `mh + 0x50620`.
+  Statically decoded from `/usr/libexec/mobileactivationd`: `0x1001BF504` is the cold block
+  `brk #0x1` after an `__os_crash`; its message is the CFString at `0x100229978`
+  = **"Failed to set backup exclusion on container path."**
+  (cstring `0x10020bf32`; reached from `0x10004F944: tbz w27, #0x0, 0x100050614`, i.e.
+  `-[NSURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:]` returned NO).
+  The daemon does that on the container path containermanagerd hands it; **the container does
+  not exist in our image**, so the call fails and Apple's code deliberately crashes.
+
+Same failure we already fixed once (`6bd5032`, `105f058`) and lost when reverting to the
+reference script (`990d716`). The reference image simply has no `Data/System` containers.
+
+### The fix now in the image
+
+`tools/sweet-seed-container.py` (new, data-only, no signed binaries touched) creates
+`private/var/containers/Data/System/{D90C94C4-F94E-4FCF-8A28-A93BE3846D8E,7D5F4CDD-1529-4133-9E26-8E449AFC95B3}`
+with `.com.apple.mobile_container_manager.metadata.plist` (identifier
+`com.apple.mobileactivationd`) and `Library/internal/data_ark.plist`
+(`-ActivationState: Activated`, `-BrickState: False`, build/version 20H392/16.7.16).
+The second UUID is the one containermanagerd actually resolves at runtime; the daemon traps if
+*that* path is missing. `fsck.hfsplus -fy` then reports the volume OK and the contents were
+verified from a read-only remount.
+
+### Flash tooling gotcha
+
+`fastboot.exe -S 512M flash userdata E:\ios-sweet\out\ios16-root.img` (raw, 16 GiB) dies with
+`std::bad_alloc` — the Windows binary tries to sparse the whole file in memory. Build the
+sparse image locally instead: `img2simg out/ios16-root.img out/ios16-root-seeded.simg`
+(~12 GiB, 10-20 min) and flash that with `-S 512M`.
+
+### NEXT
+
+1. `fastboot -S 512M flash userdata E:\ios-sweet\out\ios16-root-seeded.simg` (destructive,
+   user already confirmed 2026-10-25); if ABL hangs afterwards -> Power + Volume Down.
+2. `fastboot boot shim/out/shim-boot-davinci-ref-smp.img` (sha `1a69a651…`; reference cmdline
+   plus `sweetsample=…`, first sample at 90 s) and wait 2-5 min.
+3. When the phone falls back to MIUI recovery, `PATH=/tmp/opencode/bin:$PATH python3
+   tools/sweet-log-pull.py logs/boot-2026-10-25-seeded.log` and
+   `python3 /tmp/opencode/smpsym.py logs/boot-2026-10-25-seeded.log`.
+   Success = no `CRASH mobileactivation`, SpringBoard t0 no longer in `MadGate`, lock screen.
+4. If the trap persists, check that containermanagerd resolves the seeded container (metadata
+   may need different `MCMMetadataUserIdentity`/class values), or patch the binary:
+   `tbz w27, #0x0, 0x100050614` at main offset `0x4F944` -> `nop`
+   (AMFI patches 0025/0035/0036 allow it).
+5. If SpringBoard then proceeds but lsd deadlocks in `performJournalRecovery`, clear the
+   MobileInstallation/LaunchServices install journal in the image (that hang only appeared on
+   a many-times-booted image).
+6. Lock screen reached -> reboot with `davinci_touch_probeonly=0` for GT9886 touch events.
+7. `backup/` is still empty on this machine: the per-device partition dumps (persist,
+   modemst1/2, fsg, fsc) are NOT here. Ask the user where they are before further partition work.
 
 ## Agent handoff (2026-10-25: adopting the proven davinci config from Antcating/ios-davinci)
 

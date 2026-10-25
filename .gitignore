@@ -14,3 +14,10 @@ xnu/out-*/
 out/
 build/*.log
 __pycache__/
+
+# Windows platform-tools (adb.exe/fastboot.exe) used from WSL interop
+tools/platform-tools/
+
+# downloaded Apple artifacts / local build leftovers
+ipsw/
+*.whl
